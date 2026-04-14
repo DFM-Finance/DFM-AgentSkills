@@ -274,6 +274,7 @@ All management operations are single API calls. No confirmation needed.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
 
 ### DON'T:
+- **NEVER print, echo, log, or display secret keys or private keys in the terminal.** This is a hard security rule. Only ever display the PUBLIC KEY. Write the base58 secret key directly to `~/.zshrc` or `~/.bashrc` using file append — never output it to stdout.
 - **Don't skip web research.** Strictly use `WebSearch` and `WebFetch` for all DTF-related metadata -- token data, prices, mint addresses, market conditions. No exceptions.
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
 - **Don't use placeholder values.** Research actual token addresses and realistic allocations.
@@ -336,17 +337,11 @@ Ask your AI assistant:
 
 The assistant will:
 1. Generate a new `Keypair` via `@solana/web3.js`
-2. Save to `AGENT_WALLET_PATH` with `0o600` permissions
-3. Export base58 secret key as `DFM_AGENT_KEYPAIR`
-4. Report public key only
+2. Save the keypair JSON to `AGENT_WALLET_PATH` with `0o600` permissions
+3. Write `export DFM_AGENT_KEYPAIR="<base58-secret>"` directly to `~/.zshrc` (silently, via file append)
+4. **Only display the PUBLIC KEY in the terminal — NEVER the secret key**
 
-### Step 5 -- Export the Base58 Secret Key
-
-```bash
-export DFM_AGENT_KEYPAIR="<base58-encoded-secret-key>"
-```
-
-Add to `~/.zshrc` or `~/.bashrc` and reload. **You are now ready.**
+**SECURITY:** The secret key must NEVER appear in terminal output, logs, or chat. It is written directly to the shell profile file and the keypair JSON file — both with restricted permissions. Only the public key is printed.
 
 ## Auth
 
@@ -372,22 +367,34 @@ import { Keypair } from "@solana/web3.js";
 import * as bs58 from "bs58";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 
+// 1. Resolve output path
 const outPath = path.resolve(
   process.env.AGENT_WALLET_PATH ??
     process.env.SOLANA_KEYPAIR_PATH ??
     process.env.WALLET_OUTPUT_PATH ??
-    path.join(process.cwd(), "solana-keypair", "keypair.json")
+    path.join(os.homedir(), ".dfm", "agent-wallet.json")
 );
 
+// 2. Generate keypair and save to file
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 const keypair = Keypair.generate();
 fs.writeFileSync(outPath, JSON.stringify(Array.from(keypair.secretKey)), { mode: 0o600 });
 
-const pubkey = keypair.publicKey.toBase58();
+// 3. Write base58 secret key directly to shell profile (NEVER print to terminal)
 const base58Secret = bs58.encode(keypair.secretKey);
-// Set DFM_AGENT_KEYPAIR=base58Secret in the user's shell profile.
+const shellProfile = path.join(os.homedir(), ".zshrc");
+fs.appendFileSync(shellProfile, `\nexport DFM_AGENT_KEYPAIR="${base58Secret}"\n`);
+
+// 4. Only output the PUBLIC KEY
+const pubkey = keypair.publicKey.toBase58();
+console.log(`PUBLIC_KEY=${pubkey}`);
+console.log(`WALLET_PATH=${outPath}`);
+// NEVER console.log the base58Secret — it was written to ~/.zshrc silently
 ```
+
+**CRITICAL:** The `base58Secret` is written directly to `~/.zshrc` via `fs.appendFileSync`. It must NEVER be printed to stdout, logged, or displayed in any terminal output. Only the public key is shown to the user.
 
 ### Deriving public key from env (for API calls)
 
@@ -451,8 +458,9 @@ const signerPublicKey = keypair.publicKey.toBase58();
 
 ## Security
 
+- **NEVER display secret keys in terminal output.** Only the public key may be printed. The base58 secret is written silently to `~/.zshrc`.
 - **Agent Wallet file** -- `0o600` permissions, gitignored, never committed.
-- **`DFM_AGENT_KEYPAIR`** -- base58 secret key in env only, never in code or git.
+- **`DFM_AGENT_KEYPAIR`** -- base58 secret key in env only, never in code, git, or terminal output.
 - **No secret keys sent to backend** -- only public keys are included in API payloads. Transaction signing happens locally.
 - **Agent Wallet = on-chain authority** -- treat it like any crypto wallet. Back up securely.
 - **Policy engine = safety net** -- even a fully autonomous agent can't bypass policy constraints.
