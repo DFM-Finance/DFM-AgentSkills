@@ -84,8 +84,8 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
   "vaultName": "Blue Chip Fund",
   "vaultSymbol": "BCF",
   "underlyingAssets": [
-    { "mintAddress": "So11111111111111111111111111111111111111112", "mintBps": 5000 },
-    { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "mintBps": 5000 }
+    { "symbol": "SOL", "mintBps": 5000 },
+    { "name": "Bonk", "mintBps": 5000 }
   ],
   "managementFees": 200,
   "metadataUri": "",
@@ -105,6 +105,11 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 ```
 
 **Required fields:** `popeyeSecret`, `vaultName`, `vaultSymbol`, `underlyingAssets`, `managementFees`
+
+**Underlying asset identifier rule:**
+- For launch payloads, pass `symbol` or `name` in each `underlyingAssets[]` item (preferred).
+- Backend resolves each asset's `mintAddress` from `asset-allocation`.
+- Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
 
 **On-chain signer:**
 

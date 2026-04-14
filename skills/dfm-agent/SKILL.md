@@ -102,7 +102,7 @@ Use available tools (web search, market data, token APIs) to:
 Based on your research, autonomously decide:
 - **Vault name** — descriptive, catchy, relevant to the strategy
 - **Vault symbol** — short (max 10 chars), unique, memorable
-- **Underlying assets** — token mint addresses and allocation in basis points (must sum to 10000)
+- **Underlying assets** — pass asset `symbol` or `name` (preferred) with allocation in basis points (must sum to 10000). Backend resolves `mintAddress` from `asset-allocation`.
 - **Management fees** — in basis points (e.g. 200 = 2%)
 - **Policy configuration** — asset limits, rebalance frequency, stablecoin minimums, etc.
 - **Tags** — searchable categories
@@ -119,9 +119,9 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the **complete payload**.
   "vaultName": "Solana Blue Chips",
   "vaultSymbol": "SOLBC",
   "underlyingAssets": [
-    { "mintAddress": "So11111111111111111111111111111111111111112", "mintBps": 4000 },
-    { "mintAddress": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "mintBps": 3000 },
-    { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "mintBps": 3000 }
+    { "symbol": "SOL", "mintBps": 4000 },
+    { "symbol": "JUP", "mintBps": 3000 },
+    { "name": "Bonk", "mintBps": 3000 }
   ],
   "managementFees": 200,
   "metadataUri": "",
@@ -159,6 +159,9 @@ For DTF launch payloads, always set:
 - `logoUrl: ""`
 - `bannerUrl: ""`
 - `category: 0` (Manual) for agent-created vaults.
+- In `underlyingAssets`, send `symbol` or `name` (preferred). Backend resolves `mintAddress` from `asset-allocation`.
+- Hard restriction: never include USDC (`symbol: "USDC"` or `name: "USD Coin"`) in `underlyingAssets`.
+- If a candidate list contains USDC, remove it and replace it with another eligible non-USDC asset before sending `launch-dtf`.
 
 Minimal request shape examples:
 
@@ -222,6 +225,7 @@ All management operations are single API calls. No confirmation needed.
 - **Set sensible policies.** Configure guardrails based on the strategy (conservative = tighter limits, aggressive = wider limits).
 - **Handle errors and retry.** If an API call fails, read the error, fix the payload, and retry.
 - **Use empty launch media fields.** For `launch-dtf`, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings.
+- **Enforce USDC exclusion.** Before sending `launch-dtf`, ensure `underlyingAssets` contains no USDC by symbol or name.
 
 ### DON'T:
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
@@ -229,6 +233,7 @@ All management operations are single API calls. No confirmation needed.
 - **Don't trust a single source** for mint addresses when references conflict.
 - **Don't split into multiple steps** what can be one API call. `launch-dtf` is a single-call deployment.
 - **Don't wait for approval** on rebalancing or fee distribution. If the policy check passes, execute.
+- **Don't send USDC in launch payloads.** Never include `USDC` / `USD Coin` in `underlyingAssets`.
 
 ## Setup Guide
 
