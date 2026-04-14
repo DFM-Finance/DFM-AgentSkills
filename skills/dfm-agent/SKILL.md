@@ -88,10 +88,20 @@ When the user asks you to launch a DTF (e.g. "Create a blue chip Solana fund" or
 
 ### Step 1: Research (Agent decides)
 
-Use available tools (web search, market data, token APIs) to:
+**⚠️ HIGH PRIORITY: Strictly use `WebSearch` and `WebFetch` tools for ALL DTF-related metadata** — token discovery, prices, market caps, volume, liquidity, mint addresses, trending assets, and market conditions. No exceptions.
+
+Use `WebSearch` to find:
+- Top performing Solana tokens by market cap, volume, and price action
+- Current market conditions, trends, and sentiment
+- Token liquidity and 24h trading volume data
+
+Use `WebFetch` to pull data from:
+- Token data aggregators (CoinGecko, CoinMarketCap, Jupiter aggregator, Birdeye, DexScreener)
+- Solana token lists and verified registries for mint addresses
+
+Then decide:
 - Identify candidate tokens based on the user's intent or strategy
 - Check token liquidity, 24h volume, market cap
-- Evaluate current market conditions and trends
 - Select the best tokens and determine allocations
 - Automatically discover each token's Solana `mintAddress` from reliable references (official docs, verified token lists, explorers, major data providers)
 - Cross-check mint addresses across multiple references before including them in `underlyingAssets`
@@ -228,6 +238,7 @@ All management operations are single API calls. No confirmation needed.
 - **Enforce USDC exclusion.** Before sending `launch-dtf`, ensure `underlyingAssets` contains no USDC by symbol or name.
 
 ### DON'T:
+- **Don't skip web research.** Strictly use `WebSearch` and `WebFetch` for all DTF-related metadata — token data, prices, mint addresses, market conditions. No exceptions.
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
 - **Don't use placeholder values.** Research actual token addresses and realistic allocations.
 - **Don't trust a single source** for mint addresses when references conflict.
