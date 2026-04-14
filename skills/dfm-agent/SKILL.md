@@ -97,28 +97,67 @@ req.on("error", (e) => console.error("Error:", e.message));
 
 **You MUST complete this check before making any API call.** Do not skip this step.
 
-1. Resolve `DFM_API_URL` from the environment. If not set, default to `https://api.qa.dfm.finance`. All API calls use `{DFM_API_URL}/api/v2/agent/...` as the base.
+### Step 1: Ensure `.claude/settings.json` has env vars
 
-2. Check `DFM_AUTH_TOKEN` is set (without printing its value). If missing, STOP and tell the user:
+Claude Code runs bash in a non-interactive subprocess that does NOT source `~/.zshrc` or `~/.bashrc`. Environment variables set via `export` in the user's terminal are NOT available to Claude Code's bash commands. The **only reliable way** to pass env vars to Claude Code is via `.claude/settings.json`.
 
-   > You need a JWT auth token before using the DFM Agent.
-   > Go to the **DFM Dashboard** (https://app.dfm.so), create an Agent Profile, and copy the token, then set it:
-   >
-   > `export DFM_AUTH_TOKEN="your-jwt-here"`
+**On every pre-flight check**, run this script to sync env vars from `~/.zshrc` into `.claude/settings.json`:
 
-3. Check `DFM_AGENT_KEYPAIR` is set (without printing its value). If missing, offer to generate a wallet:
+```bash
+node -e '
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
-   > Your Agent Wallet keypair is not configured.
-   > Say **"Generate a Solana keypair for my DFM Agent wallet"** and I'll create one, or set it manually:
-   >
-   > `export DFM_AGENT_KEYPAIR="your-base58-secret-key"`
+const settingsPath = path.join(process.cwd(), ".claude", "settings.json");
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
+if (!settings.env) settings.env = {};
 
-4. **Check all env vars in a single command without exposing values:**
-   ```bash
-   node -e 'const vars = ["DFM_API_URL","DFM_AUTH_TOKEN","DFM_AGENT_KEYPAIR"]; vars.forEach(v => console.log(v + "=" + (process.env[v] ? "set" : "NOT SET")))'
-   ```
+// Read from ~/.zshrc to find exported DFM vars
+const zshrc = fs.readFileSync(path.join(os.homedir(), ".zshrc"), "utf8");
+const envVars = ["DFM_API_URL", "DFM_AUTH_TOKEN", "DFM_AGENT_KEYPAIR", "SOLANA_RPC_URL", "AGENT_WALLET_PATH"];
+for (const v of envVars) {
+  // Match export VAR="value" or export VAR=value
+  const match = zshrc.match(new RegExp("export\\s+" + v + "=[\"'\\'']?([^\"'\\''\\n]+)[\"'\\'']?"));
+  if (match && match[1]) settings.env[v] = match[1];
+  // Also check current process.env as fallback
+  if (!settings.env[v] && process.env[v]) settings.env[v] = process.env[v];
+}
 
-5. If all are set, proceed immediately with the requested operation. **Do not ask for confirmation.**
+// Set default API URL if not found
+if (!settings.env.DFM_API_URL) settings.env.DFM_API_URL = "http://0.0.0.0:3400";
+
+fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+// Report status without exposing values
+for (const v of envVars) {
+  console.log(v + "=" + (settings.env[v] ? "set" : "NOT SET"));
+}
+'
+```
+
+**If `DFM_AUTH_TOKEN` is NOT SET after this script**, STOP and tell the user:
+
+> Your DFM auth token is not configured. Add it to your `~/.zshrc`:
+>
+> ```bash
+> echo 'export DFM_AUTH_TOKEN="your-jwt-here"' >> ~/.zshrc
+> ```
+>
+> Get the token from the [DFM Dashboard](https://app.dfm.so) (Agent Profile section). Then restart Claude Code.
+
+**If `DFM_AGENT_KEYPAIR` is NOT SET** and the operation requires signing (launch-dtf, distribute-fees), offer to generate a wallet:
+
+> Your Agent Wallet keypair is not configured.
+> Say **"Generate a Solana keypair for my DFM Agent wallet"** and I'll create one.
+
+### Step 2: Proceed
+
+If all required vars are set, proceed immediately with the requested operation. **Do not ask for confirmation.**
+
+**IMPORTANT:** After writing to `.claude/settings.json` for the first time, tell the user to restart Claude Code so the env vars are picked up. On subsequent runs, the settings file already exists and env vars are available immediately.
 
 ## When To Use
 
