@@ -5,7 +5,7 @@ Fully autonomous AI agent skill for DTF (DeFi Token Fund) vault management on So
 ## Install
 
 ```bash
-npx skills add BlocSysDev/DFM-AgentSkills
+npx skills add DFM-Finance/DFM-AgentSkills
 ```
 
 > **Prerequisites:** You need a JWT auth token from the [DFM Dashboard](https://app.dfm.so) and a locally generated Solana keypair before first use.
