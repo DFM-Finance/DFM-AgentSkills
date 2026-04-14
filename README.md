@@ -2,13 +2,63 @@
 
 Fully autonomous AI agent skill for DTF (DeFi Token Fund) vault management on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys on-chain -- no human confirmation required.
 
-## Install
+## Quick Start
+
+### 1. Set environment variables
+
+```bash
+export DFM_API_URL="https://api.qa.dfm.finance"    # or http://0.0.0.0:3400 for local dev
+export DFM_AUTH_TOKEN="<JWT from DFM Dashboard>"     # 30-day expiry, revocable
+export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
+export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
+```
+
+Get your auth token from the [DFM Dashboard](https://app.dfm.so) — connect wallet, create Agent Profile, copy token.
+
+### 2. Install the skill
 
 ```bash
 npx skills add DFM-Finance/DFM-AgentSkills
 ```
 
-> **Prerequisites:** You need a JWT auth token from the [DFM Dashboard](https://app.dfm.so) and a locally generated Solana keypair before first use.
+Select your agents from the interactive prompt. For Claude Code, also copy to the `.claude/skills/` directory:
+
+```bash
+mkdir -p .claude/skills
+cp -r .agents/skills/dfm-agent .claude/skills/dfm-agent
+```
+
+### 3. Restart Claude Code and verify
+
+Restart Claude Code (`/exit` and reopen), then check the skill is loaded:
+
+```
+/skills
+```
+
+You should see `dfm-agent` listed.
+
+### 4. Generate your Agent Wallet
+
+Ask Claude Code:
+
+```
+Generate a Solana keypair for my DFM Agent wallet
+```
+
+The agent will generate a keypair, save it to `AGENT_WALLET_PATH`, write `DFM_AGENT_KEYPAIR` to your shell profile, and report only the public key.
+
+### 5. Fund the wallet
+
+Send SOL (for tx fees) and USDC (for vault creation fees) to your agent's public key.
+
+### 6. Start using
+
+```
+Launch a Solana blue chip fund
+Show me the state of SOLBC
+Rebalance SOLBC
+```
 
 ## What it does
 
@@ -24,29 +74,10 @@ The agent is the creator. It has full authority over what it launches. No human-
 
 ## Compatible runtimes
 
-- Claude Code (set to full permission mode for fully autonomous operation)
+- Claude Code (requires manual copy to `.claude/skills/` -- see step 2)
 - Codex
 - OpenClaw
-
-## Auth
-
-```bash
-# API base URL (production default: https://api.qa.dfm.finance)
-# For local dev, set to http://0.0.0.0:3400
-export DFM_API_URL="https://api.qa.dfm.finance"
-
-# JWT from DFM Dashboard (30-day expiry, revocable)
-export DFM_AUTH_TOKEN="eyJhbGciOi..."
-
-# Base58-encoded Agent Wallet secret key (used for local signing, never sent to backend)
-export DFM_AGENT_KEYPAIR="<base58-secret-key>"
-
-# Path to store the keypair JSON file
-export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
-
-# Solana RPC URL for on-chain transaction submission
-export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
-```
+- Cursor, Cline, and other supported agents (auto-installed by `npx skills add`)
 
 ## Docs
 
