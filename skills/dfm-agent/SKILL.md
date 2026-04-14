@@ -137,6 +137,51 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the **complete payload**.
 }
 ```
 
+#### Backend payload contract (must follow exactly)
+
+For every on-chain POST request, pass the signer as:
+
+```json
+{
+  "popeyeSecret": "<value of DFM_AGENT_KEYPAIR env var>"
+}
+```
+
+Do not send `DFM_AGENT_KEYPAIR` as a field name in API payloads. The backend expects the field name `popeyeSecret`.
+
+Minimal request shape examples:
+
+```bash
+# Launch DTF
+POST {DFM_API_URL}/api/v2/agent/launch-dtf
+Authorization: Bearer <DFM_AUTH_TOKEN>
+Content-Type: application/json
+{
+  "popeyeSecret": "<DFM_AGENT_KEYPAIR>",
+  "...vault fields": "..."
+}
+```
+
+```bash
+# Rebalance
+POST {DFM_API_URL}/api/v2/agent/dtf/{SYMBOL}/rebalance
+Authorization: Bearer <DFM_AUTH_TOKEN>
+Content-Type: application/json
+{
+  "popeyeSecret": "<DFM_AGENT_KEYPAIR>"
+}
+```
+
+```bash
+# Distribute fees
+POST {DFM_API_URL}/api/v2/agent/dtf/{SYMBOL}/distribute-fees
+Authorization: Bearer <DFM_AUTH_TOKEN>
+Content-Type: application/json
+{
+  "popeyeSecret": "<DFM_AGENT_KEYPAIR>"
+}
+```
+
 **What happens on the backend:**
 1. Validates payload and policy configuration
 2. Creates constitutional policy in the policy engine
@@ -209,7 +254,7 @@ export DFM_AGENT_KEYPAIR=""
 ### Step 3 — Install the Skill
 
 ```bash
-npx skills add BlocSysDev/DFM-AgentSkills
+npx skills add DFM-Finance/DFM-AgentSkills
 ```
 
 ### Step 4 — Generate Your Agent Wallet
