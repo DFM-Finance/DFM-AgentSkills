@@ -88,12 +88,12 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
     { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "mintBps": 5000 }
   ],
   "managementFees": 200,
-  "metadataUri": "https://gateway.pinata.cloud/ipfs/Qm...",
+  "metadataUri": "",
   "category": 1,
   "threshold": 500,
   "vaultType": "DTF",
-  "logoUrl": "https://example.com/logo.png",
-  "bannerUrl": "https://example.com/banner.png",
+  "logoUrl": "",
+  "bannerUrl": "",
   "description": "A diversified blue chip Solana fund",
   "noRebalance": false,
   "tags": ["DeFi", "Blue Chip"],
@@ -111,6 +111,9 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `popeyeSecret` | string | Yes | Base58-encoded signer credential from `DFM_AGENT_KEYPAIR` env var |
+
+**Launch media field rule:**
+- For DTF launch requests, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings (`""`).
 
 **Optional on-chain fields:**
 

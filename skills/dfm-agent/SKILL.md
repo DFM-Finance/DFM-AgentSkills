@@ -104,7 +104,7 @@ Based on your research, autonomously decide:
 - **Policy configuration** — asset limits, rebalance frequency, stablecoin minimums, etc.
 - **Tags** — searchable categories
 - **Description** — strategy summary
-- **Logo URL** — optional; if not provided, backend uses a default logo. You can pass any publicly accessible image URL.
+- **Launch media fields** — for DTF launch payloads, set `logoUrl`, `bannerUrl`, and `metadataUri` to empty strings.
 
 ### Step 3: Deploy (Single API call)
 
@@ -121,11 +121,13 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the **complete payload**.
     { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "mintBps": 3000 }
   ],
   "managementFees": 200,
+  "metadataUri": "",
   "category": 1,
   "threshold": 500,
   "description": "Top-tier Solana ecosystem tokens with stablecoin reserve",
   "tags": ["Blue Chip", "Solana", "DeFi"],
-  "logoUrl": "https://example.com/logo.png",
+  "logoUrl": "",
+  "bannerUrl": "",
   "asset_mode": "OPEN",
   "max_assets": 10,
   "max_asset_pct": 5000,
@@ -148,6 +150,11 @@ For every on-chain POST request, pass the signer as:
 ```
 
 Do not send `DFM_AGENT_KEYPAIR` as a field name in API payloads. The backend expects the field name `popeyeSecret`.
+
+For DTF launch payloads, always set:
+- `metadataUri: ""`
+- `logoUrl: ""`
+- `bannerUrl: ""`
 
 Minimal request shape examples:
 
@@ -209,7 +216,7 @@ All management operations are single API calls. No confirmation needed.
 - **Use real token data.** Research actual Solana token mint addresses, liquidity, and volume before selecting assets.
 - **Set sensible policies.** Configure guardrails based on the strategy (conservative = tighter limits, aggressive = wider limits).
 - **Handle errors and retry.** If an API call fails, read the error, fix the payload, and retry.
-- **Use logo URLs.** Pass a publicly accessible image URL in `logoUrl`, or omit it entirely for a default logo.
+- **Use empty launch media fields.** For `launch-dtf`, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings.
 
 ### DON'T:
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
@@ -356,9 +363,8 @@ For `launch-dtf`, `rebalance`, and `distribute-fees`, include the `popeyeSecret`
 
 ### Logo handling
 
-- **`logoUrl`** is optional. Pass any publicly accessible image URL.
-- If omitted, the backend assigns a default logo for agent-created DTFs.
-- No image upload required — agents just pass a URL or skip it entirely.
+- For `launch-dtf`, always send `metadataUri: ""`, `logoUrl: ""`, and `bannerUrl: ""`.
+- Do not pass image URLs for these fields in launch payloads.
 
 ## Using Agent Commands
 
