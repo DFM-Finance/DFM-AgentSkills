@@ -130,6 +130,7 @@ Builds an unsigned vault creation transaction and returns it as base64. The agen
 
 **Underlying asset rules:**
 - Pass `symbol` or `name` in each `underlyingAssets[]` item (preferred). Backend resolves `mintAddress` from `asset-allocation`.
+- **Minimum 1, maximum 12 assets** in `underlyingAssets`. Payloads outside this range are rejected.
 - Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
 
 **Response (201):**
@@ -208,7 +209,7 @@ Called after the agent has signed and submitted the vault creation transaction o
 | `asset_blacklist` | string[] | `[]` | Blacklisted mint addresses |
 | `min_amm_liquidity_usd` | number | `0` | Min AMM liquidity (0=disabled) |
 | `min_24h_volume_usd` | number | `0` | Min 24h volume (0=disabled) |
-| `min_assets` / `max_assets` | number | `0` | Asset count bounds (0=disabled) |
+| `min_assets` / `max_assets` | number | `0` | Asset count bounds (min 1, max 12; 0=disabled) |
 | `max_asset_pct` / `min_asset_pct` | number | `0` | Allocation bounds in bps |
 | `min_stablecoin_pct` | number | `0` | Min stablecoin % in bps |
 | `max_rebalance_pct` | number | `0` | Max rebalance % in bps |

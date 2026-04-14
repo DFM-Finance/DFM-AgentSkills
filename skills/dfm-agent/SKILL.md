@@ -281,7 +281,7 @@ After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/d
   "logoUrl": "",
   "bannerUrl": "",
   "asset_mode": "OPEN",
-  "max_assets": 10,
+  "max_assets": 12,
   "max_asset_pct": 5000,
   "min_asset_pct": 500,
   "min_stablecoin_pct": 2000,
@@ -298,6 +298,7 @@ For DTF launch payloads:
 - In `underlyingAssets`, send `symbol` or `name` (preferred). Backend resolves `mintAddress` from `asset-allocation`.
 - Hard restriction: never include USDC (`symbol: "USDC"` or `name: "USD Coin"`) in `underlyingAssets`.
 - If a candidate list contains USDC, remove it and replace it with another eligible non-USDC asset before sending `launch-dtf`.
+- **Asset count: minimum 1, maximum 12 assets** in `underlyingAssets`. The backend rejects payloads outside this range.
 
 For `dtf-create` payloads:
 - Set `logoUrl`, `bannerUrl` to empty strings.
