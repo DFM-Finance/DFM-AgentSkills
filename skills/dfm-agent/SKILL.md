@@ -52,27 +52,73 @@ DFM Agent is a **fully autonomous** AI skill for DTF (DeFi Token Fund) vault man
 | **Non-custodial** | Agent Wallet private key never leaves the user's machine. Backend never receives secret keys. |
 | **Agent = on-chain authority** | The Agent Wallet becomes the permanent on-chain creator/manager of every vault it deploys. |
 
+## Sensitive Data Rules (MANDATORY -- READ FIRST)
+
+**NEVER print, echo, log, or display the values of these environment variables in terminal output:**
+- `DFM_AUTH_TOKEN` -- JWT auth token
+- `DFM_AGENT_KEYPAIR` -- base58 secret key
+- Any private key, secret key, or auth token
+
+**To check if an env var is set, use length check only:**
+```bash
+node -e 'console.log(process.env.DFM_AUTH_TOKEN ? "set" : "not set")'
+```
+
+**NEVER do any of the following:**
+```bash
+# WRONG - exposes token in terminal output
+echo $DFM_AUTH_TOKEN
+export DFM_AUTH_TOKEN="eyJ..."   # WRONG - token visible in bash command
+curl -H "Authorization: Bearer eyJ..." ...   # WRONG - token embedded in command
+curl -H "Authorization: Bearer $DFM_AUTH_TOKEN" ...   # WRONG - shell expands and displays it
+```
+
+**ALL API calls MUST use inline `node -e` scripts** that read env vars internally via `process.env`. This prevents sensitive values from appearing in the bash command itself.
+
+**Correct pattern for API calls:**
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+const url = new URL((process.env.DFM_API_URL || "http://0.0.0.0:3400") + "/api/v2/agent/dtf/SYMBOL/state");
+const client = url.protocol === "https:" ? https : http;
+const req = client.get(url, { headers: { "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN } }, (res) => {
+  let data = "";
+  res.on("data", (chunk) => data += chunk);
+  res.on("end", () => console.log(data));
+});
+req.on("error", (e) => console.error("Error:", e.message));
+'
+```
+
+**Do NOT use `curl` for API calls.** Always use `node -e` with `process.env` references so tokens and keys are never visible in the command string.
+
 ## Pre-Flight Auth Check (REQUIRED)
 
 **You MUST complete this check before making any API call.** Do not skip this step.
 
 1. Resolve `DFM_API_URL` from the environment. If not set, default to `https://api.qa.dfm.finance`. All API calls use `{DFM_API_URL}/api/v2/agent/...` as the base.
 
-2. Verify `DFM_AUTH_TOKEN` is set in the environment. If missing, STOP and tell the user:
+2. Check `DFM_AUTH_TOKEN` is set (without printing its value). If missing, STOP and tell the user:
 
    > You need a JWT auth token before using the DFM Agent.
    > Go to the **DFM Dashboard** (https://app.dfm.so), create an Agent Profile, and copy the token, then set it:
    >
    > `export DFM_AUTH_TOKEN="your-jwt-here"`
 
-3. Verify `DFM_AGENT_KEYPAIR` is set in the environment. If missing, offer to generate a wallet:
+3. Check `DFM_AGENT_KEYPAIR` is set (without printing its value). If missing, offer to generate a wallet:
 
    > Your Agent Wallet keypair is not configured.
    > Say **"Generate a Solana keypair for my DFM Agent wallet"** and I'll create one, or set it manually:
    >
    > `export DFM_AGENT_KEYPAIR="your-base58-secret-key"`
 
-4. If all are set, proceed immediately with the requested operation. **Do not ask for confirmation.**
+4. **Check all env vars in a single command without exposing values:**
+   ```bash
+   node -e 'const vars = ["DFM_API_URL","DFM_AUTH_TOKEN","DFM_AGENT_KEYPAIR"]; vars.forEach(v => console.log(v + "=" + (process.env[v] ? "set" : "NOT SET")))'
+   ```
+
+5. If all are set, proceed immediately with the requested operation. **Do not ask for confirmation.**
 
 ## When To Use
 
@@ -274,7 +320,7 @@ All management operations are single API calls. No confirmation needed.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
 
 ### DON'T:
-- **NEVER print, echo, log, or display secret keys or private keys in the terminal.** This is a hard security rule. Only ever display the PUBLIC KEY. Write the base58 secret key directly to `~/.zshrc` or `~/.bashrc` using file append — never output it to stdout.
+- **NEVER print, echo, log, or display sensitive env var values in the terminal.** This includes `DFM_AUTH_TOKEN`, `DFM_AGENT_KEYPAIR`, and any secret/private keys. Only ever display PUBLIC KEYs. Write secrets directly to files (`~/.zshrc`) using file append -- never to stdout.
 - **Don't skip web research.** Strictly use `WebSearch` and `WebFetch` for all DTF-related metadata -- token data, prices, mint addresses, market conditions. No exceptions.
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
 - **Don't use placeholder values.** Research actual token addresses and realistic allocations.
@@ -458,9 +504,10 @@ const signerPublicKey = keypair.publicKey.toBase58();
 
 ## Security
 
-- **NEVER display secret keys in terminal output.** Only the public key may be printed. The base58 secret is written silently to `~/.zshrc`.
+- **NEVER display sensitive values in terminal output.** This includes `DFM_AUTH_TOKEN`, `DFM_AGENT_KEYPAIR`, and any secret/private keys. Only public keys may be printed. Secrets are written silently to files.
 - **Agent Wallet file** -- `0o600` permissions, gitignored, never committed.
 - **`DFM_AGENT_KEYPAIR`** -- base58 secret key in env only, never in code, git, or terminal output.
+- **`DFM_AUTH_TOKEN`** -- JWT token in env only, never printed or logged in terminal.
 - **No secret keys sent to backend** -- only public keys are included in API payloads. Transaction signing happens locally.
 - **Agent Wallet = on-chain authority** -- treat it like any crypto wallet. Back up securely.
 - **Policy engine = safety net** -- even a fully autonomous agent can't bypass policy constraints.
