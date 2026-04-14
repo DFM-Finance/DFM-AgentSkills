@@ -93,6 +93,9 @@ Use available tools (web search, market data, token APIs) to:
 - Check token liquidity, 24h volume, market cap
 - Evaluate current market conditions and trends
 - Select the best tokens and determine allocations
+- Automatically discover each token's Solana `mintAddress` from reliable references (official docs, verified token lists, explorers, major data providers)
+- Cross-check mint addresses across multiple references before including them in `underlyingAssets`
+- Reject unverified, conflicting, or low-confidence mint mappings and replace them with verified assets
 
 ### Step 2: Design (Agent decides)
 
@@ -122,7 +125,7 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the **complete payload**.
   ],
   "managementFees": 200,
   "metadataUri": "",
-  "category": 1,
+  "category": 0,
   "threshold": 500,
   "description": "Top-tier Solana ecosystem tokens with stablecoin reserve",
   "tags": ["Blue Chip", "Solana", "DeFi"],
@@ -155,6 +158,7 @@ For DTF launch payloads, always set:
 - `metadataUri: ""`
 - `logoUrl: ""`
 - `bannerUrl: ""`
+- `category: 0` (Manual) for agent-created vaults.
 
 Minimal request shape examples:
 
@@ -214,6 +218,7 @@ All management operations are single API calls. No confirmation needed.
 - **Act autonomously.** Research, decide, and deploy without asking for permission.
 - **Make complete payloads.** Include all required and relevant optional fields in one call.
 - **Use real token data.** Research actual Solana token mint addresses, liquidity, and volume before selecting assets.
+- **Resolve mint addresses automatically.** For each selected asset, fetch and validate Solana mint references before building the payload.
 - **Set sensible policies.** Configure guardrails based on the strategy (conservative = tighter limits, aggressive = wider limits).
 - **Handle errors and retry.** If an API call fails, read the error, fix the payload, and retry.
 - **Use empty launch media fields.** For `launch-dtf`, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings.
@@ -221,6 +226,7 @@ All management operations are single API calls. No confirmation needed.
 ### DON'T:
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
 - **Don't use placeholder values.** Research actual token addresses and realistic allocations.
+- **Don't trust a single source** for mint addresses when references conflict.
 - **Don't split into multiple steps** what can be one API call. `launch-dtf` is a single-call deployment.
 - **Don't wait for approval** on rebalancing or fee distribution. If the policy check passes, execute.
 

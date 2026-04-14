@@ -13,6 +13,7 @@ npx skills add DFM-Finance/DFM-AgentSkills
 ## What it does
 
 - **Autonomous DTF launch** — agent researches markets, picks tokens, decides allocations/fees/policy, deploys in one call
+- **Automatic Solana mint discovery** — agent automatically searches trusted references to resolve and validate each asset `mintAddress` before launch
 - **Portfolio rebalancing** — monitors vaults, checks policy compliance, executes sell/buy phases on-chain
 - **Fee distribution** — claims accrued management fees on-chain
 - **Policy enforcement** — the policy engine validates constraints; if the payload is valid, it deploys; if not, it returns the specific error

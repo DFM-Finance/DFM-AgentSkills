@@ -89,7 +89,7 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
   ],
   "managementFees": 200,
   "metadataUri": "",
-  "category": 1,
+  "category": 0,
   "threshold": 500,
   "vaultType": "DTF",
   "logoUrl": "",
@@ -120,7 +120,7 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `metadataUri` | string | `""` | IPFS metadata URI |
-| `category` | number | `0` | 0=Manual, 1=Automatic, 2=DAO |
+| `category` | number | `0` | For agent API launches, use `0` (Manual) only |
 | `threshold` | number/null | `null` | Rebalance threshold in bps |
 
 **Optional DB fields:**
