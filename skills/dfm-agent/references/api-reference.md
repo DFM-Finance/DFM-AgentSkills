@@ -25,12 +25,34 @@ Endpoints marked **[Public]** bypass authentication.
 |--------|-------|
 | Token type | JWT (Bearer) |
 | Expiry | 30 days |
-| Revocable | Yes — via dashboard or `POST /token/revoke` |
+| Revocable | Yes -- via dashboard or `POST /token/revoke` |
 | Request identity | Guard decodes JWT and attaches `agentPayload`, `agentId`, `userId` to request |
 
-### On-chain signer (`popeyeSecret`)
+### On-chain signing
 
-Endpoints that perform on-chain transactions (`launch-dtf`, `rebalance`, `distribute-fees`) require a `popeyeSecret` field in the request body. This is the base58-encoded Agent Wallet secret key, read from the `DFM_AGENT_KEYPAIR` environment variable.
+Endpoints that build on-chain transactions (`launch-dtf`, `distribute-fees`) return unsigned base64-encoded `VersionedTransaction`s. The agent signs them locally using the keypair from `DFM_AGENT_KEYPAIR` and submits on-chain. **No secret keys are sent to the backend.**
+
+Rebalancing (`rebalance`) is executed server-side by the admin wallet. The agent only provides its public key for identification.
+
+### Signing and submitting unsigned transactions
+
+```typescript
+import { Keypair, VersionedTransaction, Connection } from "@solana/web3.js";
+import * as bs58 from "bs58";
+
+const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
+const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
+
+async function signAndSend(base64Tx: string): Promise<string> {
+  const tx = VersionedTransaction.deserialize(Buffer.from(base64Tx, "base64"));
+  tx.sign([keypair]);
+  const sig = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false, preflightCommitment: "confirmed",
+  });
+  await connection.confirmTransaction(sig, "confirmed");
+  return sig;
+}
+```
 
 ---
 
@@ -73,14 +95,14 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 
 ---
 
-## 2. POST `/launch-dtf` - Launch DTF Vault [Authenticated]
+## 2. POST `/launch-dtf` - Build Vault Creation Transaction [Authenticated]
 
-4-step flow: create constitutional policy, deploy vault on-chain using a caller-provided Solana keypair, persist to DB, mark as agent-created.
+Builds an unsigned vault creation transaction and returns it as base64. The agent signs it locally, submits on-chain, then calls `POST /dtf-create` with the resulting transaction signature.
 
 **Request Body:**
 ```json
 {
-  "popeyeSecret": "<DFM_AGENT_KEYPAIR env variable>",
+  "signerPublicKey": "<public key derived from DFM_AGENT_KEYPAIR>",
   "vaultName": "Blue Chip Fund",
   "vaultSymbol": "BCF",
   "underlyingAssets": [
@@ -88,53 +110,91 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
     { "name": "Bonk", "mintBps": 5000 }
   ],
   "managementFees": 200,
-  "metadataUri": "",
   "category": 0,
-  "threshold": 500,
-  "vaultType": "DTF",
-  "logoUrl": "",
-  "bannerUrl": "",
-  "description": "A diversified blue chip Solana fund",
-  "noRebalance": false,
-  "tags": ["DeFi", "Blue Chip"],
-  "asset_mode": "OPEN",
-  "fee_locked": true,
-  "max_rebalances_per_day": 3,
-  "min_rebalance_interval_hours": 4
+  "threshold": 500
 }
 ```
 
-**Required fields:** `popeyeSecret`, `vaultName`, `vaultSymbol`, `underlyingAssets`, `managementFees`
-
-**Underlying asset identifier rule:**
-- For launch payloads, pass `symbol` or `name` in each `underlyingAssets[]` item (preferred).
-- Backend resolves each asset's `mintAddress` from `asset-allocation`.
-- Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
-
-**On-chain signer:**
+**Required fields:** `signerPublicKey`, `vaultName`, `vaultSymbol`, `underlyingAssets`, `managementFees`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `popeyeSecret` | string | Yes | Base58-encoded signer credential from `DFM_AGENT_KEYPAIR` env var |
+| `signerPublicKey` | string | Yes | Base58-encoded public key of the signer (fee payer) |
+| `vaultName` | string | Yes | Vault name (max 32 chars) |
+| `vaultSymbol` | string | Yes | Vault symbol (max 10 chars) |
+| `underlyingAssets` | array | Yes | Assets with allocations (symbol/name preferred, backend resolves mintAddress) |
+| `managementFees` | number | Yes | Management fees in basis points (0-10000) |
+| `metadataUri` | string | No | IPFS metadata URI (default: `""`) |
+| `category` | number | No | For agent API launches, use `0` (Manual) only |
+| `threshold` | number/null | No | Rebalance threshold in bps (default: `null`) |
 
-**Launch media field rule:**
-- For DTF launch requests, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings (`""`).
+**Underlying asset rules:**
+- Pass `symbol` or `name` in each `underlyingAssets[]` item (preferred). Backend resolves `mintAddress` from `asset-allocation`.
+- Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
 
-**Optional on-chain fields:**
+**Response (201):**
+```json
+{
+  "onChain": {
+    "transaction": "base64-encoded-unsigned-versioned-transaction...",
+    "vaultIndex": 42,
+    "vaultPda": "7Xk...def",
+    "vaultMintPda": "9Rm...ghi"
+  }
+}
+```
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `metadataUri` | string | `""` | IPFS metadata URI |
-| `category` | number | `0` | For agent API launches, use `0` (Manual) only |
-| `threshold` | number/null | `null` | Rebalance threshold in bps |
+| Field | Description |
+|-------|-------------|
+| `transaction` | Base64-encoded unsigned `VersionedTransaction` -- sign locally and submit on-chain |
+| `vaultIndex` | The vault index assigned by the factory |
+| `vaultPda` | Vault PDA address |
+| `vaultMintPda` | Vault mint PDA address |
+
+**After receiving the response:** Sign the transaction with your local keypair and submit it on-chain. Use the resulting transaction signature in `POST /dtf-create`.
+
+**Errors:** `400` Validation error, USDC blocked, insufficient balance | `404` Asset not found
+
+---
+
+## 3. POST `/dtf-create` - Create DTF (Policy + DB Persist) [Authenticated]
+
+Called after the agent has signed and submitted the vault creation transaction on-chain. Creates the constitutional policy and persists the vault to the database.
+
+**Request Body:**
+```json
+{
+  "transactionSignature": "5KzR8vN3xY7mW2pQ...",
+  "vaultName": "Blue Chip Fund",
+  "vaultSymbol": "BCF",
+  "vaultType": "DTF",
+  "description": "A diversified blue chip Solana fund",
+  "tags": ["DeFi", "Blue Chip"],
+  "logoUrl": "",
+  "bannerUrl": "",
+  "asset_mode": "OPEN",
+  "max_asset_pct": 6000,
+  "min_rebalance_interval_hours": 4,
+  "max_rebalances_per_day": 3,
+  "fee_locked": true
+}
+```
+
+**Required fields:** `transactionSignature`, `vaultName`, `vaultSymbol`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `transactionSignature` | string | Yes | On-chain transaction signature from the signed vault creation tx |
+| `vaultName` | string | Yes | Must match the name used in `launch-dtf` |
+| `vaultSymbol` | string | Yes | Must match the symbol used in `launch-dtf` |
 
 **Optional DB fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `vaultType` | `"DTF"` / `"YIELD_DTF"` | `"DTF"` | Vault type |
-| `logoUrl` | string | - | Logo image URL |
-| `bannerUrl` | string | - | Banner image URL |
+| `logoUrl` | string | - | Logo image URL (set to `""` for agent launches) |
+| `bannerUrl` | string | - | Banner image URL (set to `""` for agent launches) |
 | `description` | string | - | Vault description |
 | `noRebalance` | boolean | `false` | Disable auto-rebalancing |
 | `tags` | string[] | - | Searchable tags |
@@ -162,25 +222,32 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 **Response (201):**
 ```json
 {
-  "onChain": {
-    "signature": "5Kz...abc",
-    "vaultIndex": 42,
-    "vaultPda": "7Xk...def",
-    "vaultMintPda": "9Rm...ghi"
+  "policy": {
+    "_id": "665c...",
+    "vault_name": "Blue Chip Fund",
+    "vault_symbol": "BCF",
+    "asset_mode": "OPEN",
+    "agentDTFPolicy": true
   },
-  "vault": {
-    "vaultName": "Blue Chip Fund",
-    "vaultSymbol": "BCF",
-    "vaultIndex": 42,
-    "status": "active",
-    "transactionSignature": "5Kz...abc"
-  }
+  "vault": [
+    {
+      "eventType": "VaultCreated",
+      "vault": {
+        "vaultName": "Blue Chip Fund",
+        "vaultSymbol": "BCF",
+        "vaultIndex": 42,
+        "status": "active"
+      }
+    }
+  ]
 }
 ```
 
+**Errors:** `400` Validation error | `409` Policy already exists for this vault name/symbol
+
 ---
 
-## 3. GET `/dtf/:symbol/state` - Get Vault State [Authenticated]
+## 4. GET `/dtf/:symbol/state` - Get Vault State [Authenticated]
 
 Returns full vault details with portfolio, user holdings, and rebalance history.
 
@@ -220,35 +287,15 @@ Returns full vault details with portfolio, user holdings, and rebalance history.
   },
   "userHoldings": ["..."],
   "rebalanceHistory": {
-    "data": [
-      {
-        "_id": "665b...",
-        "vaultSymbol": "BCF",
-        "status": "completed",
-        "startTime": "2026-04-09T10:00:00.000Z",
-        "endTime": "2026-04-09T10:02:30.000Z",
-        "sellPhaseTransactions": ["..."],
-        "buyPhaseTransactions": ["..."],
-        "totalUsdcReceived": 5000,
-        "totalUsdcSpent": 4950,
-        "executionDurationMs": 150000
-      }
-    ],
-    "pagination": {
-      "page": 1,
-      "limit": 10,
-      "total": 5,
-      "totalPages": 1,
-      "hasNext": false,
-      "hasPrev": false
-    }
+    "data": ["..."],
+    "pagination": { "page": 1, "limit": 10, "total": 5 }
   }
 }
 ```
 
 ---
 
-## 4. GET `/dtf/:symbol/policy` - Get Vault Policy [Authenticated]
+## 5. GET `/dtf/:symbol/policy` - Get Vault Policy [Authenticated]
 
 Returns the constitutional policy rule set for a vault, looked up directly by `vault_symbol`.
 
@@ -285,7 +332,7 @@ Returns the constitutional policy rule set for a vault, looked up directly by `v
 
 ---
 
-## 5. GET `/dtf/:vaultSymbol/rebalance/check` - Dry-Run Rebalance Check [Authenticated]
+## 6. GET `/dtf/:vaultSymbol/rebalance/check` - Dry-Run Rebalance Check [Authenticated]
 
 Validates rebalancing against the constitutional policy without executing. Returns the suggestion if approved.
 
@@ -328,22 +375,22 @@ Validates rebalancing against the constitutional policy without executing. Retur
 
 ---
 
-## 6. POST `/dtf/:symbol/rebalance` - Execute Rebalancing [Authenticated]
+## 7. POST `/dtf/:symbol/rebalance` - Execute Rebalancing [Authenticated]
 
-Executes vault rebalancing using a caller-provided Solana keypair. Runs sell phase then buy phase on-chain.
+Triggers vault rebalancing. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
 
 **Path params:** `symbol` - Vault symbol
 
 **Request Body:**
 ```json
 {
-  "popeyeSecret": "<DFM_AGENT_KEYPAIR env variable>"
+  "signerPublicKey": "<public key derived from DFM_AGENT_KEYPAIR>"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `popeyeSecret` | string | Yes | Base58-encoded signer credential from `DFM_AGENT_KEYPAIR` env var |
+| `signerPublicKey` | string | Yes | Base58-encoded public key of the caller |
 
 **Response (200):**
 ```json
@@ -358,40 +405,51 @@ Executes vault rebalancing using a caller-provided Solana keypair. Runs sell pha
 
 ---
 
-## 7. POST `/dtf/:symbol/distribute-fees` - Distribute Management Fees [Authenticated]
+## 8. POST `/dtf/:symbol/distribute-fees` - Build Distribute Fees Transactions [Authenticated]
 
-Distributes accrued management fees for a vault on-chain using a caller-provided Solana keypair. Fees are recalculated server-side from trusted sources.
+Builds unsigned transaction(s) for distributing accrued management fees. Fees are recalculated server-side from trusted sources. Returns 1-2 base64-encoded unsigned transactions for the agent to sign locally and submit on-chain.
 
 **Path params:** `symbol` - Vault symbol
 
 **Request Body:**
 ```json
 {
-  "popeyeSecret": "<DFM_AGENT_KEYPAIR env variable>"
+  "signerPublicKey": "<public key derived from DFM_AGENT_KEYPAIR>"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `popeyeSecret` | string | Yes | Base58-encoded signer credential from `DFM_AGENT_KEYPAIR` env var |
+| `signerPublicKey` | string | Yes | Base58-encoded public key of the signer (fee payer) |
 
 **Response (200):**
 ```json
 {
-  "status": "success",
-  "message": "OK",
-  "transactionSignature": "3Rz...xyz",
-  "data": {
-    "transactionSignature": "3Rz...xyz",
-    "vaultIndex": 42,
-    "date": "2026-04-10"
-  }
+  "transactions": [
+    "base64-encoded-unsigned-distribute-fees-tx..."
+  ],
+  "vaultIndex": 42,
+  "date": "2026-04-10",
+  "managementFeesAmountRaw": 1500000,
+  "sharePriceRaw": 1050000
 }
 ```
 
+| Field | Description |
+|-------|-------------|
+| `transactions` | Array of base64-encoded unsigned `VersionedTransaction`s -- sign and submit **in order** |
+| `vaultIndex` | Vault index |
+| `date` | Distribution date |
+| `managementFeesAmountRaw` | Server-calculated fee amount in raw USDC (6 decimals) |
+| `sharePriceRaw` | Server-calculated share price in raw format (6 decimals) |
+
+**After receiving the response:** Sign each transaction in order with your local keypair, submit on-chain, and wait for confirmation before submitting the next.
+
+**Errors:** `400` Fees zero or negative, distribution failed | `404` Vault not found
+
 ---
 
-## 8. POST `/token/revoke` - Revoke Agent Token [Authenticated]
+## 9. POST `/token/revoke` - Revoke Agent Token [Authenticated]
 
 Revokes the current agent auth token immediately. The token in the `Authorization` header is the one that gets revoked.
 
@@ -408,7 +466,7 @@ Revokes the current agent auth token immediately. The token in the `Authorizatio
 
 ---
 
-## 9. POST `/token/refresh` - Refresh Agent Token [Public]
+## 10. POST `/token/refresh` - Refresh Agent Token [Public]
 
 Re-issues a new agent token using the agent's `profileId`. Revokes **all** existing tokens for the agent. Use this when the current token has expired.
 
@@ -443,16 +501,17 @@ AgentProfileController
     v
 AgentProfileService
     |
-    +-- AgentVaultService (on-chain vault creation via caller-provided keypair)
+    +-- AgentVaultService (builds unsigned vault creation transactions)
     +-- PolicyEngineService (constitutional policy CRUD)
-    +-- AgentRebalanceService (rebalancing via caller-provided keypair)
-    +-- VaultFactoryService (DB vault operations + fee distribution)
+    +-- AgentRebalanceService (rebalancing executed by admin wallet)
+    +-- VaultFactoryService (DB vault operations + builds unsigned fee distribution txs)
     +-- VaultManagementFeesService (fee calculation)
     +-- VaultInsightsService (portfolio & holdings)
     +-- VaultRebalancingService (suggestions & history)
     +-- TxEventManagementService (on-chain tx parsing & DB persistence)
 ```
 
-**Agent Signing:**
-- Vault creation, rebalancing, and fee distribution use a caller-provided Solana keypair (`popeyeSecret`) for on-chain transaction signing
-- `AgentPriceSignerService` - Price message signing for fee distribution (server-side KMS, not caller-provided)
+**Signing:**
+- Vault creation and fee distribution return unsigned transactions for local signing (no secret keys sent to backend)
+- Rebalancing is executed server-side by the admin wallet; caller provides public key for identification
+- `AgentPriceSignerService` -- server-side KMS price message signing for fee distribution (not caller-provided)
