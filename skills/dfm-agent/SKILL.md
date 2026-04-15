@@ -93,6 +93,8 @@ req.on("error", (e) => console.error("Error:", e.message));
 
 **Do NOT use `curl` for API calls.** Always use `node -e` with `process.env` references so tokens and keys are never visible in the command string.
 
+**IMPORTANT: No timeout on API calls.** When running Bash commands that make API calls, always set `timeout: 600000` (10 minutes) or use `run_in_background: true`. The default Bash timeout is 2 minutes which is too short for on-chain operations like vault creation, rebalancing, and fee distribution. Never let an API call get killed by a timeout.
+
 ## Pre-Flight Auth Check (REQUIRED)
 
 **You MUST complete this check before making any API call.** Do not skip this step.
@@ -425,6 +427,7 @@ All management operations are single API calls. No confirmation needed.
 - **Use empty launch media fields.** For `launch-dtf` and `dtf-create`, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings.
 - **Enforce USDC exclusion.** Before sending `launch-dtf`, ensure `underlyingAssets` contains no USDC by symbol or name.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
+- **Set long timeouts on all API calls.** Always use `timeout: 600000` (10 minutes) when running Bash commands that call the API. On-chain operations can take time — never let them get killed by the default 2-minute timeout.
 
 ### DON'T:
 - **NEVER expose technical details to the user.** Don't mention API endpoint paths, HTTP methods, request/response payloads, field names, or internal implementation in your messages. The user should only see friendly status updates (e.g. "Creating your profile now..." NOT "I'll call POST /profile-launch with your wallet address").
