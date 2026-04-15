@@ -311,7 +311,7 @@ Use the agent's local keypair to sign the returned transaction and submit it to 
 
 ```typescript
 import { Keypair, VersionedTransaction, Connection } from "@solana/web3.js";
-import * as bs58 from "bs58";
+const bs58 = require("bs58").default || require("bs58");
 
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
 const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
@@ -376,7 +376,7 @@ Both `launch-dtf` and `distribute-fees` return base64-encoded unsigned `Versione
 
 ```typescript
 import { Keypair, VersionedTransaction, Connection } from "@solana/web3.js";
-import * as bs58 from "bs58";
+const bs58 = require("bs58").default || require("bs58");
 
 async function signAndSendTransaction(
   base64Tx: string,
@@ -521,7 +521,7 @@ The auth token is obtained automatically during first use via `POST /profile-lau
 
 ```typescript
 import { Keypair } from "@solana/web3.js";
-import * as bs58 from "bs58";
+const bs58 = require("bs58").default || require("bs58");
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -557,7 +557,7 @@ console.log(`WALLET_PATH=${outPath}`);
 
 ```typescript
 import { Keypair } from "@solana/web3.js";
-import * as bs58 from "bs58";
+const bs58 = require("bs58").default || require("bs58");
 
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
 const signerPublicKey = keypair.publicKey.toBase58();

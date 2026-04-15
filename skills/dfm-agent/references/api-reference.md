@@ -33,7 +33,7 @@ Rebalancing (`rebalance`) is executed server-side by the admin wallet. The agent
 
 ```typescript
 import { Keypair, VersionedTransaction, Connection } from "@solana/web3.js";
-import * as bs58 from "bs58";
+const bs58 = require("bs58").default || require("bs58");
 
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
 const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
