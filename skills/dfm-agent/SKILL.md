@@ -248,14 +248,17 @@ Use `WebSearch` to find:
 - Top performing Solana tokens by market cap, volume, and price action
 - Current market conditions, trends, and sentiment
 - Token liquidity and 24h trading volume data
+- **For yield DTFs**: Solana LSTs (liquid staking tokens) and yield-bearing tokens — mSOL, jitoSOL, bSOL, INF, hSOL, stSOL, and their current APYs, TVLs, and staking yields
 
 Use `WebFetch` to pull data from:
 - Token data aggregators (CoinGecko, CoinMarketCap, Jupiter aggregator, Birdeye, DexScreener)
 - Solana token lists and verified registries for mint addresses
+- **For yield DTFs**: Staking yield aggregators, LST protocol sites (Marinade, Jito, BlazeStake, Sanctum), and DeFi yield dashboards
 
 Then decide:
 - Identify candidate tokens based on the user's intent or strategy
 - Check token liquidity, 24h volume, market cap
+- **For yield DTFs**: Prioritize LSTs and yield-bearing assets with highest APY and deepest liquidity
 - Select the best tokens and determine allocations
 - Automatically discover each token's Solana `mintAddress` from reliable references (official docs, verified token lists, explorers, major data providers)
 - Cross-check mint addresses across multiple references before including them in `underlyingAssets`
@@ -264,12 +267,15 @@ Then decide:
 ### Step 2: Design (Agent decides)
 
 Based on your research, autonomously decide:
+- **Vault type** -- `"DTF"` for standard diversified token funds, `"YIELD_DTF"` for yield-bearing / LST-focused funds. Set in the `dtf-create` payload.
 - **Vault name** -- descriptive, catchy, relevant to the strategy
 - **Vault symbol** -- short (max 10 chars), unique, memorable
 - **Underlying assets** -- pass asset `symbol` or `name` (preferred) with allocation in basis points (must sum to 10000). Backend resolves `mintAddress` from `asset-allocation`.
+  - For **DTF**: standard tokens (SOL, JUP, Bonk, RAY, etc.)
+  - For **YIELD_DTF**: LSTs and yield-bearing tokens (mSOL, jitoSOL, bSOL, INF, etc.)
 - **Management fees** -- in basis points (e.g. 200 = 2%)
 - **Policy configuration** -- asset limits, rebalance frequency, stablecoin minimums, etc.
-- **Tags** -- searchable categories
+- **Tags** -- searchable categories (include "Yield", "LST", "Staking" for yield DTFs)
 - **Description** -- strategy summary
 - **Launch media fields** -- for DTF launch payloads, set `logoUrl`, `bannerUrl`, and `metadataUri` to empty strings.
 
@@ -379,6 +385,7 @@ The agent MUST decide ALL policy values based on the vault strategy:
 | **Conservative** (blue chip, index) | 3000-4000 | 500-1000 | 500000 | 1000000 | 2 | 6 |
 | **Moderate** (mixed, ecosystem) | 4000-5000 | 500 | 100000 | 500000 | 3 | 4 |
 | **Aggressive** (meme, trending) | 5000-6000 | 300 | 50000 | 100000 | 4 | 2 |
+| **Yield** (LSTs, staking, yield) | 4000-5000 | 500-1000 | 500000 | 500000 | 1 | 12 |
 
 Always set:
 - `asset_mode`: `"OPEN"` (default), or `"WHITELIST"`/`"BLACKLIST"` if the strategy requires restrictions
@@ -401,6 +408,7 @@ For DTF launch payloads:
 
 For `dtf-create` payloads:
 - **Include ALL policy fields** — do not omit any. The agent decides values autonomously.
+- Set `vaultType`: `"DTF"` for standard funds, `"YIELD_DTF"` for yield/LST funds.
 - Set `logoUrl`, `bannerUrl` to empty strings.
 - `vaultName` and `vaultSymbol` must match what was used in `launch-dtf`.
 
