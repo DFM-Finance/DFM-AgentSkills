@@ -11,7 +11,7 @@ Go to the [DFM Dashboard](https://app.dfm.so) and connect your Solana wallet (Ph
 ### 2. Set base environment variables
 
 ```bash
-export DFM_API_URL="https://api.qa.dfm.finance"    # or http://0.0.0.0:3400 for local dev
+export DFM_API_URL="<your-dfm-api-url>"
 export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
 export SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
 ```

@@ -4,12 +4,7 @@ Base URL: `{DFM_API_URL}/api/v2/agent`
 
 The `DFM_API_URL` environment variable defines the API host. All endpoints below are relative to this base URL.
 
-| Environment | `DFM_API_URL` |
-|---|---|
-| **Production** | `https://api.qa.dfm.finance` |
-| **Local dev** | `http://0.0.0.0:3400` |
-
-If `DFM_API_URL` is not set, default to `https://api.qa.dfm.finance`.
+`DFM_API_URL` must be set in the environment. There is no default — if not set, STOP and ask the user to set it.
 
 ## Authentication
 
