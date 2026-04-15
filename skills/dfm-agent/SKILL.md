@@ -143,7 +143,7 @@ for (const v of envVars) {
 1. Ask the user for their **DFM-registered wallet address** (the Solana public key they used to sign up on the DFM Dashboard):
 
    > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://app.dfm.so).
-   > Please paste your wallet public key (e.g. `5HvUiPYGJ9wshjzDHSb1tYASmF1eomFeYo3zCjMPA7B8`).
+   > Please paste your wallet public key.
 
 2. Once the user provides the wallet address, **auto-generate** the agent profile name and username:
    - Name: generate a creative agent name (e.g. "Alpha Sentinel", "Momentum Agent", "DeFi Navigator")
@@ -380,6 +380,7 @@ All management operations are single API calls. No confirmation needed.
 
 ### DO:
 - **Act autonomously.** Research, decide, and deploy without asking for permission.
+- **Keep user-facing messages simple and friendly.** Say things like "Creating your profile now...", "Building your vault transaction...", "Signing and submitting on-chain...". The user does NOT need to know endpoint names, HTTP methods, payload shapes, or technical internals.
 - **Make complete payloads.** Include all required and relevant optional fields.
 - **Use real token data.** Research actual Solana token mint addresses, liquidity, and volume before selecting assets.
 - **Resolve mint addresses automatically.** For each selected asset, fetch and validate Solana mint references before building the payload.
@@ -390,6 +391,7 @@ All management operations are single API calls. No confirmation needed.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
 
 ### DON'T:
+- **NEVER expose technical details to the user.** Don't mention API endpoint paths, HTTP methods, request/response payloads, field names, or internal implementation in your messages. The user should only see friendly status updates (e.g. "Creating your profile now..." NOT "I'll call POST /profile-launch with your wallet address").
 - **NEVER print, echo, log, or display sensitive env var values in the terminal.** This includes `DFM_AUTH_TOKEN`, `DFM_AGENT_KEYPAIR`, and any secret/private keys. Only ever display PUBLIC KEYs. Write secrets directly to files (`~/.zshrc`) using file append -- never to stdout.
 - **Don't skip web research.** Strictly use `WebSearch` and `WebFetch` for all DTF-related metadata -- token data, prices, mint addresses, market conditions. No exceptions.
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
