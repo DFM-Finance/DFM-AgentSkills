@@ -376,6 +376,37 @@ After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/d
 }
 ```
 
+**Example: WHITELIST mode (for curated LST yield fund):**
+```json
+{
+  "transactionSignature": "<signature>",
+  "vaultName": "Solana LST Yield",
+  "vaultSymbol": "SLSTY",
+  "vaultType": "YIELD_DTF",
+  "description": "Diversified Solana liquid staking token yield fund",
+  "tags": ["Yield", "LST", "Staking", "Solana"],
+  "logoUrl": "",
+  "bannerUrl": "",
+  "asset_mode": "WHITELIST_ONLY",
+  "asset_whitelist": ["mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1"],
+  "asset_blacklist": [],
+  "min_amm_liquidity_usd": 500000,
+  "min_24h_volume_usd": 500000,
+  "min_assets": 2,
+  "max_assets": 8,
+  "max_asset_pct": 5000,
+  "min_asset_pct": 1000,
+  "min_stablecoin_pct": 0,
+  "max_rebalance_pct": 2000,
+  "min_rebalance_interval_hours": 12,
+  "max_rebalances_per_day": 1,
+  "max_rebalances_per_week": 5,
+  "launch_blackout_hours": 24,
+  "fee_locked": true,
+  "notes": "Whitelisted LST-only yield fund — only approved liquid staking tokens allowed"
+}
+```
+
 #### Policy field decision guide
 
 The agent MUST decide ALL policy values based on the vault strategy:
@@ -388,7 +419,12 @@ The agent MUST decide ALL policy values based on the vault strategy:
 | **Yield** (LSTs, staking, yield) | 4000-5000 | 500-1000 | 500000 | 500000 | 1 | 12 |
 
 Always set:
-- `asset_mode`: `"OPEN"` (default), or `"WHITELIST"`/`"BLACKLIST"` if the strategy requires restrictions
+- `asset_mode`: choose based on the vault strategy:
+  - `"OPEN"` — any asset can be added. No restrictions. Use for broad market / index / aggressive strategies.
+  - `"WHITELIST_ONLY"` — only assets in `asset_whitelist` are allowed. Use for curated funds (e.g. "only blue chips", "only LSTs"). Set `asset_whitelist` to the mint addresses of the selected assets.
+  - `"OPEN_BLACKLIST"` — all assets allowed except those in `asset_blacklist`. Use when you want to exclude specific risky assets. Set `asset_blacklist` to the mint addresses to exclude.
+  - `"WHITELIST_BLACKLIST"` — only whitelisted assets allowed, with additional blacklist exclusions. Use for strict curated funds with explicit exclusions. Set both `asset_whitelist` and `asset_blacklist`.
+  - **Decision rule:** If the user asks for a specific category fund (e.g. "LST fund", "blue chip only", "top 5 DeFi tokens"), use `WHITELIST_ONLY`. If the user asks for broad exposure, use `OPEN`. If the user says "exclude meme coins" or similar, use `OPEN_BLACKLIST`.
 - `min_assets`: set to the number of assets in the vault (or lower)
 - `max_assets`: `12` (hard max)
 - `max_rebalance_pct`: `2000`-`3000` (20-30% max change per rebalance)

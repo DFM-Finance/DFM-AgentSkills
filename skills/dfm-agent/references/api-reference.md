@@ -199,7 +199,7 @@ Called after the agent has signed and submitted the vault creation transaction o
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `asset_mode` | `"OPEN"` / `"WHITELIST"` / `"BLACKLIST"` | `"OPEN"` | Asset restriction mode |
+| `asset_mode` | `"OPEN"` / `"WHITELIST_ONLY"` / `"OPEN_BLACKLIST"` / `"WHITELIST_BLACKLIST"` | `"OPEN"` | Asset restriction mode |
 | `asset_whitelist` | string[] | `[]` | Whitelisted mint addresses |
 | `asset_blacklist` | string[] | `[]` | Blacklisted mint addresses |
 | `min_amm_liquidity_usd` | number | `0` | Min AMM liquidity (0=disabled) |
