@@ -338,6 +338,8 @@ await connection.confirmTransaction(signature, "confirmed");
 
 After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/dtf-create` with the transaction signature and policy configuration:
 
+**You MUST include ALL policy fields in every `dtf-create` payload.** The agent decides values based on the vault strategy. Missing fields default to 0/disabled which means no policy guardrails.
+
 ```json
 {
   "transactionSignature": "<signature from step 3b>",
@@ -349,15 +351,44 @@ After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/d
   "logoUrl": "",
   "bannerUrl": "",
   "asset_mode": "OPEN",
+  "asset_whitelist": [],
+  "asset_blacklist": [],
+  "min_amm_liquidity_usd": 100000,
+  "min_24h_volume_usd": 500000,
+  "min_assets": 3,
   "max_assets": 12,
-  "max_asset_pct": 5000,
+  "max_asset_pct": 4000,
   "min_asset_pct": 500,
-  "min_stablecoin_pct": 2000,
+  "min_stablecoin_pct": 0,
+  "max_rebalance_pct": 2500,
   "min_rebalance_interval_hours": 4,
   "max_rebalances_per_day": 3,
-  "fee_locked": true
+  "max_rebalances_per_week": 14,
+  "launch_blackout_hours": 24,
+  "fee_locked": true,
+  "notes": "Auto-generated policy for blue chip strategy"
 }
 ```
+
+#### Policy field decision guide
+
+The agent MUST decide ALL policy values based on the vault strategy:
+
+| Strategy Type | `max_asset_pct` | `min_asset_pct` | `min_amm_liquidity_usd` | `min_24h_volume_usd` | `max_rebalances_per_day` | `min_rebalance_interval_hours` |
+|---|---|---|---|---|---|---|
+| **Conservative** (blue chip, index) | 3000-4000 | 500-1000 | 500000 | 1000000 | 2 | 6 |
+| **Moderate** (mixed, ecosystem) | 4000-5000 | 500 | 100000 | 500000 | 3 | 4 |
+| **Aggressive** (meme, trending) | 5000-6000 | 300 | 50000 | 100000 | 4 | 2 |
+
+Always set:
+- `asset_mode`: `"OPEN"` (default), or `"WHITELIST"`/`"BLACKLIST"` if the strategy requires restrictions
+- `min_assets`: set to the number of assets in the vault (or lower)
+- `max_assets`: `12` (hard max)
+- `max_rebalance_pct`: `2000`-`3000` (20-30% max change per rebalance)
+- `max_rebalances_per_week`: `max_rebalances_per_day * 7` or less
+- `launch_blackout_hours`: `24` (prevent rebalancing in first 24h)
+- `fee_locked`: `true` (always lock fees)
+- `notes`: brief description of the strategy and policy rationale
 
 #### Backend payload rules
 
@@ -369,6 +400,7 @@ For DTF launch payloads:
 - **Asset count: minimum 1, maximum 12 assets** in `underlyingAssets`. The backend rejects payloads outside this range.
 
 For `dtf-create` payloads:
+- **Include ALL policy fields** — do not omit any. The agent decides values autonomously.
 - Set `logoUrl`, `bannerUrl` to empty strings.
 - `vaultName` and `vaultSymbol` must match what was used in `launch-dtf`.
 
