@@ -6,7 +6,7 @@ description: |
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
   no human confirmation required. The policy engine is the guardrail, not a human approval step.
   Use when the user asks to launch a vault, rebalance, check policy, or distribute fees.
-homepage: https://dfm.so
+homepage: https://app.dfm.finance
 license: Proprietary
 compatibility: Claude Code, Codex, OpenClaw
 metadata: {"category":"defi-agent","auth":"jwt+keypair","author":"dfm","tags":"solana,defi,vault,rebalance,dtf,fund-management,autonomous-agent"}
@@ -143,7 +143,7 @@ for (const v of envVars) {
 
 1. Ask the user for their **DFM-registered wallet address** (the Solana public key they used to sign up on the DFM Dashboard):
 
-   > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://app.dfm.so).
+   > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://app.app.dfm.finance).
    > Please paste your wallet public key.
 
 2. Once the user provides the wallet address, **auto-generate** the agent profile name and username:
@@ -527,7 +527,7 @@ All management operations are single API calls. No confirmation needed.
 
 ### Step 1 -- Register on the DFM Dashboard
 
-1. Go to the **DFM Dashboard** (https://app.dfm.so) and connect your Solana wallet (Phantom, Backpack, etc.).
+1. Go to the **DFM Dashboard** (https://app.app.dfm.finance) and connect your Solana wallet (Phantom, Backpack, etc.).
 2. Your wallet address is now registered. Note it down — you'll need it for agent setup.
 
 ### Step 2 -- Set Base Environment Variables
