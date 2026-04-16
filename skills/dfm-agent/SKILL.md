@@ -6,7 +6,7 @@ description: |
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
   no human confirmation required. The policy engine is the guardrail, not a human approval step.
   Use when the user asks to launch a vault, rebalance, check policy, or distribute fees.
-homepage: https://app.dfm.finance
+homepage: https://qa.dfm.finance
 license: Proprietary
 compatibility: Claude Code, Codex, OpenClaw
 metadata: {"category":"defi-agent","auth":"jwt+keypair","author":"dfm","tags":"solana,defi,vault,rebalance,dtf,fund-management,autonomous-agent"}
@@ -143,7 +143,7 @@ for (const v of envVars) {
 
 1. Ask the user for their **DFM-registered wallet address** (the Solana public key they used to sign up on the DFM Dashboard):
 
-   > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://app.app.dfm.finance).
+   > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://qa.dfm.finance).
    > Please paste your wallet public key.
 
 2. Once the user provides the wallet address, **auto-generate** the agent profile name and username:
@@ -527,7 +527,7 @@ All management operations are single API calls. No confirmation needed.
 
 ### Step 1 -- Register on the DFM Dashboard
 
-1. Go to the **DFM Dashboard** (https://app.app.dfm.finance) and connect your Solana wallet (Phantom, Backpack, etc.).
+1. Go to the **DFM Dashboard** (https://qa.dfm.finance) and connect your Solana wallet (Phantom, Backpack, etc.).
 2. Your wallet address is now registered. Note it down — you'll need it for agent setup.
 
 ### Step 2 -- Set Base Environment Variables
@@ -535,8 +535,8 @@ All management operations are single API calls. No confirmation needed.
 ```bash
 # -- DFM Agent Configuration -------------------------------------------
 
-# API base URL (REQUIRED — set to your DFM backend URL)
-export DFM_API_URL="<your-dfm-api-url>"
+# API base URL
+export DFM_API_URL="https://api.qa.dfm.finance"
 
 # Path where the Agent Wallet keypair is stored locally
 export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
