@@ -153,11 +153,16 @@ for (const v of envVars) {
    > To set up your DFM Agent, I need the **Solana wallet address** you registered on the DFM Dashboard (https://qa.dfm.finance).
    > Please paste your wallet public key.
 
-2. Once the user provides the wallet address, **auto-generate** the agent profile name and username:
+2. **Ensure the agent wallet exists** — the profile launch requires the agent's wallet public key.
+   - If `DFM_AGENT_KEYPAIR` is already set, derive the public key from it (do NOT generate a new one).
+   - If a keypair file exists at `AGENT_WALLET_PATH` (default `~/.dfm/agent-wallet.json`), load it and derive the public key.
+   - Only if neither exists, generate a new keypair. See "Agent Wallet -- Keypair Generation" section below.
+
+3. Once the user provides the wallet address and the agent keypair exists, **auto-generate** the agent profile name and username:
    - Name: generate a creative agent name (e.g. "Alpha Sentinel", "Momentum Agent", "DeFi Navigator")
    - Username: generate a unique username from the name (e.g. "alpha_sentinel", "momentum_agent")
 
-3. **Create the profile AND save the token in a single script** — the API call, token extraction, and env var writing must all happen inside one `node -e` script so the token is NEVER visible in terminal output. Write a script file and execute it:
+4. **Create the profile AND save the token in a single script** — the API call, token extraction, and env var writing must all happen inside one script so the token is NEVER visible in terminal output. Write a script file and execute it:
 
    Write a file called `.claude/profile-launch.js` with this content, then run it with `node .claude/profile-launch.js`:
 
@@ -167,14 +172,21 @@ for (const v of envVars) {
    const fs = require("fs");
    const path = require("path");
    const os = require("os");
+   const { Keypair } = require("@solana/web3.js");
+   const bs58 = require("bs58").default || require("bs58");
 
    const apiUrl = process.env.DFM_API_URL;
    const walletAddress = process.argv[2];
    const agentName = process.argv[3];
    const agentUsername = process.argv[4];
 
+   // Derive agent wallet public key from DFM_AGENT_KEYPAIR
+   const agentKeypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
+   const agentWalletAddress = agentKeypair.publicKey.toBase58();
+
    const payload = JSON.stringify({
      userPublicKey: walletAddress,
+     agentWalletAddress: agentWalletAddress,
      name: agentName,
      username: agentUsername,
      metadata: [{ key: "created_by", value: "dfm-agent-skill" }]
@@ -193,7 +205,7 @@ for (const v of envVars) {
        try {
          const json = JSON.parse(data);
          const token = json.data?.token?.token;
-         if (!token) { console.log("ERROR: No token in response"); process.exit(1); }
+         if (!token) { console.log("ERROR: No token in response. Response: " + data); process.exit(1); }
 
          // Write to .claude/settings.json
          const sp = path.join(process.cwd(), ".claude", "settings.json");
@@ -211,6 +223,7 @@ for (const v of envVars) {
          console.log("STATUS=success");
          console.log("AGENT_NAME=" + profileName);
          console.log("AGENT_USERNAME=" + profileUsername);
+         console.log("AGENT_WALLET=" + agentWalletAddress);
          console.log("DFM_AUTH_TOKEN=set");
        } catch (e) { console.log("ERROR: " + e.message); process.exit(1); }
      });
@@ -222,9 +235,9 @@ for (const v of envVars) {
 
    Run it as: `node .claude/profile-launch.js <WALLET_ADDRESS> "<AGENT_NAME>" "<AGENT_USERNAME>"`
 
-   The script outputs ONLY `STATUS=success`, `AGENT_NAME=...`, `AGENT_USERNAME=...`, and `DFM_AUTH_TOKEN=set`. The actual token value is written directly to `.claude/settings.json` and `~/.zshrc` — it NEVER appears in terminal output.
+   The script derives `agentWalletAddress` from `DFM_AGENT_KEYPAIR` automatically and includes it in the payload. It outputs ONLY `STATUS=success`, `AGENT_NAME=...`, `AGENT_USERNAME=...`, `AGENT_WALLET=...`, and `DFM_AUTH_TOKEN=set`. The actual token value is written directly to `.claude/settings.json` and `~/.zshrc` — it NEVER appears in terminal output.
 
-4. Tell the user: "Agent profile created! Restart Claude Code to pick up the auth token, then you're ready to go."
+5. Tell the user: "Agent profile created! Restart your AI agent to pick up the auth token, then you're ready to go."
 
 **If `DFM_AGENT_KEYPAIR` is NOT SET** and the operation requires signing (launch-dtf, distribute-fees), auto-generate a wallet (see "Agent Wallet -- Keypair Generation" section below). Do not ask — just generate it.
 
@@ -666,7 +679,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 
 | Action | Method | Endpoint | Auth | Body |
 |---|---|---|---|---|
-| Launch agent profile | `POST` | `/profile-launch` | No | `userPublicKey` + name/username |
+| Launch agent profile | `POST` | `/profile-launch` | No | `userPublicKey` + `agentWalletAddress` + name/username |
 | Build vault tx | `POST` | `/launch-dtf` | JWT | `signerPublicKey` + vault config |
 | Create DTF (policy + DB) | `POST` | `/dtf-create` | JWT | `transactionSignature` + policy config |
 | My vaults | `GET` | `/dtf/my-vaults` | JWT | - |

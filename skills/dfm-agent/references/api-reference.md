@@ -51,7 +51,48 @@ async function signAndSend(base64Tx: string): Promise<string> {
 
 ---
 
-## 1. POST `/profile` - Create Agent Profile [Public]
+## 1. POST `/profile-launch` - Launch Agent Profile [Public]
+
+Creates an agent profile by looking up the user via wallet public key. Requires the agent's Solana wallet address. Returns agent profile and JWT token.
+
+**Request Body:**
+```json
+{
+  "userPublicKey": "YourDFMWalletHere",
+  "agentWalletAddress": "YourAgentWalletPublicKeyHere",
+  "name": "Alpha Agent",
+  "username": "agent_alpha",
+  "metadata": [{ "key": "strategy", "value": "momentum" }]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `userPublicKey` | string | Yes | DFM-registered wallet address |
+| `agentWalletAddress` | string | Yes | Agent's Solana wallet public key (for on-chain vault creation) |
+| `name` | string | Yes | Display name |
+| `username` | string | Yes | Unique username (alphanumeric + underscores) |
+| `metadata` | array | No | Arbitrary key-value metadata |
+
+**Response (201):**
+```json
+{
+  "agentProfile": {
+    "_id": "664a...",
+    "profileId": "60f7...",
+    "agentWalletAddress": "YourAgentWalletPublicKeyHere",
+    "name": "Alpha Agent",
+    "username": "agent_alpha"
+  },
+  "token": { "token": "eyJhbGciOi...", "expiresIn": "30d" }
+}
+```
+
+**Errors:** `400` Validation error | `404` No profile found for wallet | `409` Username taken or agent already exists
+
+---
+
+## 2. POST `/profile` - Create Agent Profile (by profileId) [Public]
 
 Creates a new agent profile linked to an existing user profile. Returns a JWT auth token for subsequent API calls.
 
