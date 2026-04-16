@@ -243,7 +243,33 @@ Called after the agent has signed and submitted the vault creation transaction o
 
 ---
 
-## 4. GET `/dtf/:symbol/state` - Get Vault State [Authenticated]
+## 4. GET `/dtf/my-vaults` - List My Vaults [Authenticated]
+
+Returns all DTF vaults created by the authenticated agent's wallet. No request body — wallet is extracted from the JWT token.
+
+**Response (200):**
+```json
+{
+  "vaults": [
+    {
+      "_id": "69e095fd...",
+      "vaultName": "Solana Top 3 Alpha",
+      "vaultSymbol": "SOLT3",
+      "vaultType": "DTF",
+      "status": "active",
+      "vaultIndex": 64,
+      "creatorAddress": "YourWalletHere",
+      "agentCreated": true,
+      "createdAt": "2026-04-16T07:55:41.319Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+## 5. GET `/dtf/:symbol/state` - Get Vault State [Authenticated]
 
 Returns full vault details with portfolio, user holdings, and rebalance history.
 

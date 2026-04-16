@@ -669,6 +669,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Launch agent profile | `POST` | `/profile-launch` | No | `userPublicKey` + name/username |
 | Build vault tx | `POST` | `/launch-dtf` | JWT | `signerPublicKey` + vault config |
 | Create DTF (policy + DB) | `POST` | `/dtf-create` | JWT | `transactionSignature` + policy config |
+| My vaults | `GET` | `/dtf/my-vaults` | JWT | - |
 | Vault state | `GET` | `/dtf/:symbol/state` | JWT | - |
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
 | Rebalance check | `GET` | `/dtf/:symbol/rebalance/check` | JWT | - |
