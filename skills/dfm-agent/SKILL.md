@@ -139,6 +139,13 @@ for (const v of envVars) {
 '
 ```
 
+**If `DFM_AUTH_TOKEN` is SET but any API call returns 401 (Unauthorized / token expired):**
+
+1. Ask the user for their **DFM-registered wallet address**.
+2. Call `POST {DFM_API_URL}/api/v2/agent/token/refresh-by-wallet` with `{ "walletAddress": "<wallet>" }` (this is a **[Public]** endpoint, no JWT needed).
+3. Extract `token` from the response and write it to `.claude/settings.json` and `~/.zshrc` (NEVER print it).
+4. Tell the user to restart their AI agent. Then retry the original operation.
+
 **If `DFM_AUTH_TOKEN` is NOT SET after this script**, run the automated agent profile creation flow:
 
 1. Ask the user for their **DFM-registered wallet address** (the Solana public key they used to sign up on the DFM Dashboard):
@@ -668,7 +675,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Rebalance | `POST` | `/dtf/:symbol/rebalance` | JWT | `signerPublicKey` |
 | Build distribute fees tx | `POST` | `/dtf/:symbol/distribute-fees` | JWT | `signerPublicKey` |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
-| Refresh token | `POST` | `/token/refresh` | No | `profileId` |
+| Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
+| Refresh token (by wallet) | `POST` | `/token/refresh-by-wallet` | No | `walletAddress` |
 
 ### On-chain operations
 

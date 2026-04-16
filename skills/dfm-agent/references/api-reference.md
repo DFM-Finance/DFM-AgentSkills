@@ -489,6 +489,33 @@ Re-issues a new agent token using the agent's `profileId`. Revokes **all** exist
 
 ---
 
+## 11. POST `/token/refresh-by-wallet` - Refresh Agent Token by Wallet [Public]
+
+Re-issues a new agent token using the wallet address registered on the DFM Dashboard. Revokes **all** existing tokens for the agent. Use this when the current token has expired and you don't have the profileId.
+
+**Request Body:**
+```json
+{
+  "walletAddress": "YourWalletPublicKeyHere"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `walletAddress` | string | Yes | Base58-encoded public key of the DFM-registered wallet |
+
+**Response (200):**
+```json
+{
+  "token": "eyJhbGciOi...",
+  "expiresIn": "30d"
+}
+```
+
+**Errors:** `404` No profile or agent found for this wallet address
+
+---
+
 ## Architecture
 
 ```

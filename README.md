@@ -31,34 +31,32 @@ mkdir -p .claude/skills
 cp -r .agents/skills/dfm-agent .claude/skills/dfm-agent
 ```
 
-### 4. Restart Claude Code and verify
+### 4. Restart your AI agent and verify
 
-Restart Claude Code (`/exit` and reopen), then check the skill is loaded:
+Restart your AI agent (Claude Code: `/exit` and reopen, Cursor: restart), then verify the skill is loaded.
 
+For Claude Code:
 ```
 /skills
 ```
-
 You should see `dfm-agent` listed.
 
 ### 5. Launch your Agent Profile
 
-Tell Claude Code:
+Tell your AI agent:
 
 ```
 Launch my agent profile
 ```
 
 The agent will:
-1. Ask for your **DFM-registered wallet address** (the Solana public key you connected on the Dashboard)
+1. Ask for your **DFM-registered wallet address**
 2. Auto-generate an agent profile name and username
-3. Call the `POST /profile-launch` API to create your agent profile
-4. Save the returned **auth token** to `.claude/settings.json` and `~/.zshrc` (never printed in terminal)
-5. Auto-generate a **Solana keypair** for your agent wallet
-6. Save the keypair and export `DFM_AGENT_KEYPAIR` to `~/.zshrc` (never printed in terminal)
-7. Report only your **public key**
+3. Create your agent profile and save the **auth token** (never printed in terminal)
+4. Auto-generate a **Solana keypair** for your agent wallet (never printed in terminal)
+5. Report only your **public key**
 
-After this, restart Claude Code once more and you're fully set up.
+After this, restart your AI agent once more and you're fully set up.
 
 ### 6. Fund the wallet
 
@@ -73,6 +71,22 @@ Rebalance SOLBC
 Distribute fees for SOLBC
 ```
 
+## Updating the skill
+
+To update to the latest version, run the same install command in your project:
+
+```bash
+npx skills add DFM-Finance/DFM-AgentSkills
+```
+
+It will pull the latest from GitHub and overwrite the existing files. For Claude Code, also re-copy:
+
+```bash
+cp -r .agents/skills/dfm-agent .claude/skills/dfm-agent
+```
+
+Then restart your AI agent.
+
 ## Already have an auth token?
 
 If you already have a `DFM_AUTH_TOKEN` from the Dashboard, set it directly:
@@ -82,6 +96,16 @@ export DFM_AUTH_TOKEN="<your-jwt-here>"
 ```
 
 The agent will skip the profile launch step and use this token for all API calls.
+
+## Token expired?
+
+If your token has expired (30-day limit), tell your AI agent:
+
+```
+Refresh my agent token
+```
+
+It will ask for your wallet address and auto-refresh the token via `POST /token/refresh-by-wallet`.
 
 ## What it does
 
@@ -98,9 +122,10 @@ The agent is the creator. It has full authority over what it launches. No human-
 ## Compatible runtimes
 
 - Claude Code (requires manual copy to `.claude/skills/` -- see step 3)
+- Cursor (auto-installed via `.cursor/rules/`)
 - Codex
 - OpenClaw
-- Cursor, Cline, and other supported agents (auto-installed by `npx skills add`)
+- Cline, and other supported agents (auto-installed by `npx skills add`)
 
 ## Docs
 
