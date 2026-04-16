@@ -427,20 +427,52 @@ Validates rebalancing against the constitutional policy without executing. Retur
 ```
 
 **Response (400) - Policy Violated:**
+
+Returns ALL violated policies. The `violations` array lists every rule that failed with its code, message, and optional details.
+
 ```json
 {
   "statusCode": 400,
   "error": "PolicyViolation",
-  "violationCode": "RULE_9_MIN_INTERVAL",
-  "message": "Rebalancing too soon. Minimum interval is 4 hours."
+  "message": "Must wait 4h between rebalances | Max 3 rebalances per day exceeded",
+  "violations": [
+    {
+      "violationCode": "rule9MinTimeBetweenRebalances",
+      "message": "Must wait 4h between rebalances",
+      "details": { "lastRebalanceAt": "2026-04-10T11:30:00.000Z", "minIntervalHours": 4 }
+    },
+    {
+      "violationCode": "rule10MaxRebalancesDayWeek",
+      "message": "Max 3 rebalances per day exceeded",
+      "details": { "rebalanceCountDay": 3, "maxPerDay": 3 }
+    }
+  ]
 }
 ```
+
+**Violation codes:**
+
+| Code | Description |
+|------|-------------|
+| `assetModeViolation` | Asset not allowed by vault's asset mode |
+| `rule1WhitelistBlacklist` | Blacklisted or not whitelisted |
+| `rule2MinAmmLiquidity` | Below min AMM liquidity |
+| `rule3Min24hVolume` | Below min 24h volume |
+| `platformMaxAssetsExceeded` | Exceeds platform max (12) |
+| `rule4MinMaxAssetCount` | Asset count out of bounds |
+| `rule5MaxPctPerAsset` | Single asset over max % |
+| `rule6MinPctPerAssetIfHeld` | Held asset under min % |
+| `rule7MinStablecoinFloor` | Stablecoin below floor |
+| `rule8MaxPctRebalancedPerTx` | Rebalance % too large |
+| `rule9MinTimeBetweenRebalances` | Too soon since last rebalance |
+| `rule10MaxRebalancesDayWeek` | Daily/weekly cap exceeded |
+| `rule11LaunchBlackout` | In launch blackout period |
 
 ---
 
 ## 7. POST `/dtf/:symbol/rebalance` - Execute Rebalancing [Authenticated]
 
-Triggers vault rebalancing. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
+Triggers vault rebalancing. Runs full policy evaluation before executing — if any policy rule is violated, returns all violations. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
 
 **Path params:** `symbol` - Vault symbol
 
@@ -464,7 +496,23 @@ Triggers vault rebalancing. The caller provides their public key for identificat
 }
 ```
 
-**Errors:** `400` Policy violated or rebalancing already in progress | `404` Vault not found
+**Response (400) - Policy Violated:**
+
+Same format as rebalance check — all violated policies returned:
+
+```json
+{
+  "statusCode": 400,
+  "error": "PolicyViolation",
+  "message": "Policy violated: [rule9MinTimeBetweenRebalances] Must wait 4h between rebalances; [rule11LaunchBlackout] Vault in 24h launch blackout",
+  "violations": [
+    { "violationCode": "rule9MinTimeBetweenRebalances", "message": "Must wait 4h between rebalances" },
+    { "violationCode": "rule11LaunchBlackout", "message": "Vault in 24h launch blackout" }
+  ]
+}
+```
+
+**Errors:** `400` Policy violated (with `violations` array) or rebalancing already in progress | `404` Vault not found
 
 ---
 

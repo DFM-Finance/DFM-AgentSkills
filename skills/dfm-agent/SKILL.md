@@ -520,6 +520,28 @@ After launch, the agent autonomously:
 
 All management operations are single API calls. No confirmation needed.
 
+### Policy Violation Handling
+
+Both `/rebalance/check` and `/rebalance` run a **full policy evaluation** against all 13 constitutional policy rules. If any rules are violated, the response returns a `violations` array listing **every** violated rule (not just the first):
+
+```json
+{
+  "statusCode": 400,
+  "error": "PolicyViolation",
+  "message": "Must wait 4h between rebalances | Max 3 rebalances per day exceeded",
+  "violations": [
+    { "violationCode": "rule9MinTimeBetweenRebalances", "message": "Must wait 4h between rebalances" },
+    { "violationCode": "rule10MaxRebalancesDayWeek", "message": "Max 3 rebalances per day exceeded" }
+  ]
+}
+```
+
+When you receive policy violations:
+1. **Read each violation** in the `violations` array — each has a `violationCode` and `message`.
+2. **Report all violations clearly** to the user (e.g. "Rebalancing blocked: too soon since last rebalance AND daily rebalance cap reached.").
+3. **Do not retry immediately** for time-based violations (`rule9`, `rule10`, `rule11`) — these require waiting.
+4. **For allocation violations** (`rule5`, `rule6`, `rule7`, `rule8`) — the suggested allocations need adjustment before retrying.
+
 ## Behavioral Guidelines
 
 ### DO:
@@ -722,7 +744,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **"Keypair file not found"** | Re-generate wallet (Step 4). Check: `ls -la $AGENT_WALLET_PATH` |
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
 | **Transaction fails on-chain** | Agent Wallet needs SOL for tx fees + USDC for vault creation fee. Fund the wallet first. |
-| **Policy validation error** | Read the error message -- it tells you exactly which field/rule failed. Fix and retry. |
+| **Policy validation error** | Read the `violations` array in the response — it lists ALL violated rules with `violationCode` and `message`. Time-based violations (rule9/10/11) require waiting; allocation violations (rule5/6/7/8) require adjusting the suggested allocations. |
 | **Token revoked unexpectedly** | A token refresh revokes **all** prior tokens. One active token per agent. |
 | **409 Conflict on dtf-create** | A policy already exists for this vault name/symbol. Use a unique name and symbol. |
 
