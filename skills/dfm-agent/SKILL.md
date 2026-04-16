@@ -478,7 +478,17 @@ const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mai
 const sig = await signAndSendTransaction(response.onChain.transaction, keypair, connection);
 ```
 
-**If something is wrong**, the API returns an error with the specific issue -- the agent can fix and retry without human intervention.
+**CRITICAL ERROR HANDLING RULES for vault deployment:**
+
+1. **NEVER call `launch-dtf` again after a transaction has been signed and submitted on-chain.** The on-chain vault creation is irreversible and costs USDC. If `dtf-create` fails, only retry `dtf-create` with the SAME transaction signature, vault name, and symbol. Do NOT generate a new name/symbol or call `launch-dtf` again.
+
+2. **If `launch-dtf` fails** (before any on-chain submission): you MAY retry `launch-dtf` with adjusted payload (fix the error).
+
+3. **If signing/submission fails**: you MAY retry `launch-dtf` to get a new unsigned transaction (the previous one was never submitted, so no on-chain cost).
+
+4. **If `dtf-create` fails** (after successful on-chain submission): ONLY retry `dtf-create` with the exact same `transactionSignature`, `vaultName`, and `vaultSymbol`. NEVER change these values. NEVER call `launch-dtf` again.
+
+5. **Keep the transaction signature**: after a successful on-chain submission, store the signature and reuse it for all `dtf-create` retries. This is the link between the on-chain vault and the database record.
 
 ### Step 4: Manage (Ongoing, autonomous)
 
