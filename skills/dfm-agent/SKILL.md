@@ -522,25 +522,31 @@ All management operations are single API calls. No confirmation needed.
 
 ### Policy Violation Handling
 
-Both `/rebalance/check` and `/rebalance` run a **full policy evaluation** against all 13 constitutional policy rules. If any rules are violated, the response returns a `violations` array listing **every** violated rule (not just the first):
+Both `/rebalance/check` and `/rebalance` run a **full policy evaluation** against all 11 constitutional policy rules. **Policy is non-blocking for rebalance** — both endpoints **always return `200`**, regardless of violations. Rule violations appear in the response under `policyCheck`:
 
 ```json
 {
-  "statusCode": 400,
-  "error": "PolicyViolation",
-  "message": "Must wait 4h between rebalances | Max 3 rebalances per day exceeded",
-  "violations": [
-    { "violationCode": "rule9MinTimeBetweenRebalances", "message": "Must wait 4h between rebalances" },
-    { "violationCode": "rule10MaxRebalancesDayWeek", "message": "Max 3 rebalances per day exceeded" }
-  ]
+  "policyCheck": {
+    "ok": true,
+    "flagged": true,
+    "reviewFlags": [
+      { "violationCode": "rule5MaxPctPerAsset", "mint": "JUP...", "message": "...", "details": {...} },
+      { "violationCode": "rule7MinStablecoinFloor", "message": "...", "details": null }
+    ],
+    "violations": [ ... ]
+  },
+  "suggestion": { ... }       // present on /rebalance/check
+  // upfrontFeeSol, actualFeesSol present on /rebalance
 }
 ```
 
-When you receive policy violations:
-1. **Read each violation** in the `violations` array — each has a `violationCode` and `message`.
-2. **Report all violations clearly** to the user (e.g. "Rebalancing blocked: too soon since last rebalance AND daily rebalance cap reached.").
-3. **Do not retry immediately** for time-based violations (`rule9`, `rule10`, `rule11`) — these require waiting.
-4. **For allocation violations** (`rule5`, `rule6`, `rule7`, `rule8`) — the suggested allocations need adjustment before retrying.
+Every violation is also persisted as a `policyReviewFlag` on the latest `RebalancingSuggestion` for that vault (operator audit trail).
+
+When `policyCheck.flagged` is `true`:
+1. **Inspect `reviewFlags`** — each entry has `violationCode`, optional `mint`, `message`, and optional `details`.
+2. **Surface the situation clearly to the user** as a non-blocking warning (e.g. "Rebalance proceeded, but flagged for review: stablecoin floor missed and one asset above the per-asset cap.").
+3. **Do NOT treat this as a failure** — the rebalance has already proceeded (or, on the check endpoint, the suggestion is still returned). Don't block the user flow on `flagged: true`.
+4. **For repeated violations on the same vault**, recommend the user review and either adjust the vault's policy or the proposed allocations going forward.
 
 ## Behavioral Guidelines
 
@@ -564,7 +570,7 @@ When you receive policy violations:
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
 - **Don't use placeholder values.** Research actual token addresses and realistic allocations.
 - **Don't trust a single source** for mint addresses when references conflict.
-- **Don't wait for approval** on rebalancing or fee distribution. If the policy check passes, execute.
+- **Don't wait for approval** on rebalancing or fee distribution. Rebalance policy check is non-blocking — proceed even when `policyCheck.flagged` is true.
 - **Don't send USDC in launch payloads.** Never include `USDC` / `USD Coin` in `underlyingAssets`.
 - **Don't send secret keys to the backend.** Only public keys are sent. Signing happens locally.
 
@@ -744,7 +750,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **"Keypair file not found"** | Re-generate wallet (Step 4). Check: `ls -la $AGENT_WALLET_PATH` |
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
 | **Transaction fails on-chain** | Agent Wallet needs SOL for tx fees + USDC for vault creation fee. Fund the wallet first. |
-| **Policy validation error** | Read the `violations` array in the response — it lists ALL violated rules with `violationCode` and `message`. Time-based violations (rule9/10/11) require waiting; allocation violations (rule5/6/7/8) require adjusting the suggested allocations. |
+| **Policy `flagged: true` on rebalance** | Rebalance is non-blocking — the operation already proceeded. Inspect `policyCheck.reviewFlags` to see which rules were violated and surface them to the user as a warning. Same flags are persisted on the latest `RebalancingSuggestion.policyReviewFlags`. |
 | **Token revoked unexpectedly** | A token refresh revokes **all** prior tokens. One active token per agent. |
 | **409 Conflict on dtf-create** | A policy already exists for this vault name/symbol. Use a unique name and symbol. |
 
