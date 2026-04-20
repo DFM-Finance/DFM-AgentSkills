@@ -397,14 +397,17 @@ Returns the constitutional policy rule set for a vault, looked up directly by `v
 
 ## 6. GET `/dtf/:vaultSymbol/rebalance/check` - Dry-Run Rebalance Check [Authenticated]
 
-Validates rebalancing against the constitutional policy without executing. Returns the suggestion if approved.
+Runs a non-blocking policy evaluation and creates/refreshes the rebalancing suggestion. **Always returns 200** — rebalance is never blocked by constitutional policy. Any rule violations are persisted as `policyReviewFlags` on the latest `RebalancingSuggestion` and surfaced in the response under `policyCheck.flagged` / `policyCheck.reviewFlags`.
 
 **Path params:** `vaultSymbol` - Vault symbol
 
-**Response (200) - Approved:**
+**Response (200) - Clean (no violations):**
 ```json
 {
-  "policyCheck": { "ok": true },
+  "policyCheck": {
+    "ok": true,
+    "flagged": false
+  },
   "suggestion": {
     "vaultId": "664a...",
     "vaultSymbol": "BCF",
@@ -426,29 +429,42 @@ Validates rebalancing against the constitutional policy without executing. Retur
 }
 ```
 
-**Response (400) - Policy Violated:**
-
-Returns ALL violated policies. The `violations` array lists every rule that failed with its code, message, and optional details.
-
+**Response (200) - Flagged (violations present, rebalance still proceeds):**
 ```json
 {
-  "statusCode": 400,
-  "error": "PolicyViolation",
-  "message": "Must wait 4h between rebalances | Max 3 rebalances per day exceeded",
-  "violations": [
-    {
-      "violationCode": "rule9MinTimeBetweenRebalances",
-      "message": "Must wait 4h between rebalances",
-      "details": { "lastRebalanceAt": "2026-04-10T11:30:00.000Z", "minIntervalHours": 4 }
-    },
-    {
-      "violationCode": "rule10MaxRebalancesDayWeek",
-      "message": "Max 3 rebalances per day exceeded",
-      "details": { "rebalanceCountDay": 3, "maxPerDay": 3 }
-    }
-  ]
+  "policyCheck": {
+    "ok": true,
+    "flagged": true,
+    "reviewFlags": [
+      {
+        "violationCode": "rule5MaxPctPerAsset",
+        "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+        "message": "Mint JUP... proposed at 60%; policy max is 30%.",
+        "details": { "mint": "JUP..." }
+      },
+      {
+        "violationCode": "rule7MinStablecoinFloor",
+        "message": "Proposed stablecoin share is 0%; policy requires at least 10%.",
+        "details": null
+      }
+    ],
+    "violations": [
+      { "violationCode": "rule5MaxPctPerAsset", "message": "...", "details": {...} },
+      { "violationCode": "rule7MinStablecoinFloor", "message": "...", "details": null }
+    ]
+  },
+  "suggestion": { ... }
 }
 ```
+
+**`policyCheck` fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | `true` | Always true — rebalance is non-blocking. |
+| `flagged` | `boolean` | `true` if any rule violation was raised (and persisted as a `policyReviewFlag` on the latest suggestion). |
+| `reviewFlags` | `Array<{violationCode, mint?, message, details?}>` | Present only when `flagged: true`. Mirrors `RebalancingSuggestion.policyReviewFlags`. |
+| `violations` | `RuleEvaluationResult[]` | Full list of rule violations. Empty/absent when none. |
 
 **Violation codes:**
 
@@ -458,7 +474,7 @@ Returns ALL violated policies. The `violations` array lists every rule that fail
 | `rule1WhitelistBlacklist` | Blacklisted or not whitelisted |
 | `rule2MinAmmLiquidity` | Below min AMM liquidity |
 | `rule3Min24hVolume` | Below min 24h volume |
-| `platformMaxAssetsExceeded` | Exceeds platform max (12) |
+| `platformMaxAssetsExceeded` | Exceeds platform max (15) |
 | `rule4MinMaxAssetCount` | Asset count out of bounds |
 | `rule5MaxPctPerAsset` | Single asset over max % |
 | `rule6MinPctPerAssetIfHeld` | Held asset under min % |
@@ -468,11 +484,13 @@ Returns ALL violated policies. The `violations` array lists every rule that fail
 | `rule10MaxRebalancesDayWeek` | Daily/weekly cap exceeded |
 | `rule11LaunchBlackout` | In launch blackout period |
 
+**Errors:** `404` Vault or constitutional policy not found.
+
 ---
 
 ## 7. POST `/dtf/:symbol/rebalance` - Execute Rebalancing [Authenticated]
 
-Triggers vault rebalancing. Runs full policy evaluation before executing — if any policy rule is violated, returns all violations. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
+Triggers vault rebalancing. **Policy is non-blocking** — any rule violations are persisted as `policyReviewFlags` on the latest `RebalancingSuggestion` and surfaced under `policyCheck` in the response, but rebalancing still proceeds. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
 
 **Path params:** `symbol` - Vault symbol
 
@@ -487,32 +505,56 @@ Triggers vault rebalancing. Runs full policy evaluation before executing — if 
 |-------|------|----------|-------------|
 | `signerPublicKey` | string | Yes | Base58-encoded public key of the caller |
 
-**Response (200):**
+**Response (200) - Clean (no policy violations):**
 ```json
 {
   "ok": true,
   "vaultId": "664a1b2c3d4e5f6a7b8c9d0e",
-  "vaultSymbol": "BCF"
+  "vaultSymbol": "BCF",
+  "upfrontFeeSol": 0.005,
+  "actualFeesSol": 0.0042,
+  "policyCheck": {
+    "ok": true,
+    "flagged": false
+  }
 }
 ```
 
-**Response (400) - Policy Violated:**
-
-Same format as rebalance check — all violated policies returned:
-
+**Response (200) - Flagged (rebalance proceeded with policy review flags):**
 ```json
 {
-  "statusCode": 400,
-  "error": "PolicyViolation",
-  "message": "Policy violated: [rule9MinTimeBetweenRebalances] Must wait 4h between rebalances; [rule11LaunchBlackout] Vault in 24h launch blackout",
-  "violations": [
-    { "violationCode": "rule9MinTimeBetweenRebalances", "message": "Must wait 4h between rebalances" },
-    { "violationCode": "rule11LaunchBlackout", "message": "Vault in 24h launch blackout" }
-  ]
+  "ok": true,
+  "vaultId": "664a1b2c3d4e5f6a7b8c9d0e",
+  "vaultSymbol": "BCF",
+  "upfrontFeeSol": 0.005,
+  "actualFeesSol": 0.0042,
+  "policyCheck": {
+    "ok": true,
+    "flagged": true,
+    "reviewFlags": [
+      {
+        "violationCode": "rule9MinTimeBetweenRebalances",
+        "message": "Last rebalance was 2.00h ago; policy requires at least 6h.",
+        "details": { "lastRebalanceAt": "2026-04-20T08:30:00.000Z", "requiredHours": 6 }
+      }
+    ],
+    "violations": [
+      { "violationCode": "rule9MinTimeBetweenRebalances", "message": "...", "details": {...} }
+    ]
+  }
 }
 ```
 
-**Errors:** `400` Policy violated (with `violations` array) or rebalancing already in progress | `404` Vault not found
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | `true` | Operation completed (rebalance was attempted). |
+| `vaultId` / `vaultSymbol` | string | Vault identifiers. |
+| `upfrontFeeSol` / `actualFeesSol` | number | SOL fees from the execution record. |
+| `policyCheck` | object | Same shape as Section 6 — `{ ok, flagged, reviewFlags?, violations? }`. |
+
+**Errors:** `400` rebalancing already in progress | `404` Vault not found | `500` Execution failure (e.g. insufficient SOL, on-chain error). Policy violations no longer return 400 — they appear as `policyCheck.flagged` in the 200 response.
 
 ---
 
