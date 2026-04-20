@@ -116,35 +116,125 @@ let settings = {};
 try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
 if (!settings.env) settings.env = {};
 
-// Read from ~/.zshrc to find exported DFM vars
-const zshrc = fs.readFileSync(path.join(os.homedir(), ".zshrc"), "utf8");
+// Reject sentinel/placeholder values that should never be honoured.
+const isInvalid = (v) => {
+  if (!v || typeof v !== "string") return true;
+  const t = v.trim();
+  if (!t) return true;
+  if (t === "+token+" || t === "<token>" || t.startsWith("+")) return true;
+  if (t.startsWith("\"") || t.endsWith("\"")) return true; // stray quotes from bad templating
+  return false;
+};
+
+let zshrc = "";
+try { zshrc = fs.readFileSync(path.join(os.homedir(), ".zshrc"), "utf8"); } catch {}
+
 const envVars = ["DFM_API_URL", "DFM_AUTH_TOKEN", "DFM_AGENT_KEYPAIR", "SOLANA_RPC_URL", "AGENT_WALLET_PATH"];
 for (const v of envVars) {
-  // Match export VAR="value" or export VAR=value
-  const match = zshrc.match(new RegExp("export\\s+" + v + "=[\"'\\'']?([^\"'\\''\\n]+)[\"'\\'']?"));
-  if (match && match[1]) settings.env[v] = match[1];
-  // Also check current process.env as fallback
-  if (!settings.env[v] && process.env[v]) settings.env[v] = process.env[v];
-}
+  // 1) Keep settings.json value if already valid (it is updated in-process by refresh / launch scripts).
+  if (!isInvalid(settings.env[v])) continue;
 
-// DFM_API_URL must be set by the user — no default
+  // 2) Pull from ~/.zshrc. Use a global regex and take the LAST match — newest export wins
+  //    when the file accumulates multiple `export VAR=...` lines.
+  const re = new RegExp("export\\s+" + v + "=[\"\\047]?([^\"\\047\\n]+)[\"\\047]?", "g");
+  let lastMatch = null, m;
+  while ((m = re.exec(zshrc)) !== null) lastMatch = m;
+  if (lastMatch && !isInvalid(lastMatch[1])) {
+    settings.env[v] = lastMatch[1];
+    continue;
+  }
+
+  // 3) Final fallback: current process env
+  if (!isInvalid(process.env[v])) settings.env[v] = process.env[v];
+  else delete settings.env[v]; // ensure no garbage placeholder lingers
+}
 
 fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
 
-// Report status without exposing values
 for (const v of envVars) {
-  console.log(v + "=" + (settings.env[v] ? "set" : "NOT SET"));
+  console.log(v + "=" + (!isInvalid(settings.env[v]) ? "set" : "NOT SET"));
 }
 '
 ```
 
 **If `DFM_AUTH_TOKEN` is SET but any API call returns 401 (Unauthorized / token expired):**
 
-1. Ask the user for their **DFM-registered wallet address**.
-2. Call `POST {DFM_API_URL}/api/v2/agent/token/refresh-by-wallet` with `{ "walletAddress": "<wallet>" }` (this is a **[Public]** endpoint, no JWT needed).
-3. Extract `token` from the response and write it to `.claude/settings.json` and `~/.zshrc` (NEVER print it).
-4. Tell the user to restart their AI agent. Then retry the original operation.
+1. Ask the user for their **DFM-registered wallet address** (only if you don't already know it).
+2. Run the **token refresh script below** with the wallet address. The script calls `POST {DFM_API_URL}/api/v2/agent/token/refresh-by-wallet`, writes the new JWT to `.claude/settings.json`, and **replaces** any existing `export DFM_AUTH_TOKEN=` line in `~/.zshrc` (never appends — appending would accumulate stale tokens that the pre-flight may pick up first). The token value is **never printed**.
+3. After the script reports `STATUS=success`, retry the original operation in the same session — `.claude/settings.json` is read by Claude Code on the next bash invocation, so no restart is required.
+
+**DO NOT improvise the refresh.** Earlier improvised attempts have written literal placeholder strings (e.g. `+token+`) into `settings.json`. Always use this exact script.
+
+Write the script once to `.claude/refresh-token.js`, then run it with `node .claude/refresh-token.js <WALLET_ADDRESS>`:
+
+```javascript
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const apiUrl = process.env.DFM_API_URL;
+const walletAddress = process.argv[2];
+if (!apiUrl) { console.log("ERROR: DFM_API_URL not set"); process.exit(1); }
+if (!walletAddress) { console.log("ERROR: usage: node refresh-token.js <walletAddress>"); process.exit(1); }
+
+const payload = JSON.stringify({ walletAddress });
+const url = new URL(apiUrl + "/api/v2/agent/token/refresh-by-wallet");
+const client = url.protocol === "https:" ? https : http;
+
+const req = client.request(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+}, (res) => {
+  let data = "";
+  res.on("data", (c) => data += c);
+  res.on("end", () => {
+    try {
+      const json = JSON.parse(data);
+      // Backend response shape: { status, message, data: { token, expires, expiresPrettyPrint, expiresAt } }
+      const token = json.data?.token || json.token;
+      if (!token || typeof token !== "string" || token.startsWith("+")) {
+        console.log("ERROR: No valid token in response: " + data);
+        process.exit(1);
+      }
+
+      // (1) Update .claude/settings.json
+      const sp = path.join(process.cwd(), ".claude", "settings.json");
+      let s = {}; try { s = JSON.parse(fs.readFileSync(sp, "utf8")); } catch {}
+      if (!s.env) s.env = {};
+      s.env.DFM_AUTH_TOKEN = token;
+      fs.mkdirSync(path.dirname(sp), { recursive: true });
+      fs.writeFileSync(sp, JSON.stringify(s, null, 2));
+
+      // (2) REPLACE any existing DFM_AUTH_TOKEN export in ~/.zshrc; never append duplicates.
+      const zshrcPath = path.join(os.homedir(), ".zshrc");
+      let zshrc = "";
+      try { zshrc = fs.readFileSync(zshrcPath, "utf8"); } catch {}
+      const newLine = "export DFM_AUTH_TOKEN=\"" + token + "\"";
+      const lineRe = /^\s*export\s+DFM_AUTH_TOKEN=.*$/gm;
+      if (lineRe.test(zshrc)) {
+        zshrc = zshrc.replace(lineRe, newLine);
+      } else {
+        if (zshrc.length && !zshrc.endsWith("\n")) zshrc += "\n";
+        zshrc += newLine + "\n";
+      }
+      fs.writeFileSync(zshrcPath, zshrc);
+
+      // Output ONLY safe info — NEVER the token
+      console.log("STATUS=success");
+      console.log("DFM_AUTH_TOKEN=set");
+    } catch (e) {
+      console.log("ERROR: " + e.message);
+      process.exit(1);
+    }
+  });
+});
+req.on("error", (e) => { console.log("ERROR: " + e.message); process.exit(1); });
+req.write(payload);
+req.end();
+```
 
 **If `DFM_AUTH_TOKEN` is NOT SET after this script**, run the automated agent profile creation flow:
 
@@ -214,8 +304,19 @@ for (const v of envVars) {
          s.env.DFM_AUTH_TOKEN = token;
          fs.writeFileSync(sp, JSON.stringify(s, null, 2));
 
-         // Append to ~/.zshrc
-         fs.appendFileSync(path.join(os.homedir(), ".zshrc"), "\nexport DFM_AUTH_TOKEN=\"" + token + "\"\n");
+         // REPLACE any existing DFM_AUTH_TOKEN export in ~/.zshrc; never append duplicates.
+         const zshrcPath = path.join(os.homedir(), ".zshrc");
+         let zshrc = "";
+         try { zshrc = fs.readFileSync(zshrcPath, "utf8"); } catch {}
+         const newLine = "export DFM_AUTH_TOKEN=\"" + token + "\"";
+         const lineRe = /^\s*export\s+DFM_AUTH_TOKEN=.*$/gm;
+         if (lineRe.test(zshrc)) {
+           zshrc = zshrc.replace(lineRe, newLine);
+         } else {
+           if (zshrc.length && !zshrc.endsWith("\n")) zshrc += "\n";
+           zshrc += newLine + "\n";
+         }
+         fs.writeFileSync(zshrcPath, zshrc);
 
          // Only output safe info — NEVER the token
          const profileName = json.data?.agentProfile?.name || agentName;
@@ -746,7 +847,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 
 | Problem | Fix |
 |---|---|
-| **"Unauthorized" errors** | Token expired (30-day limit). Refresh via `POST /token/refresh`. Verify: `echo $DFM_AUTH_TOKEN` |
+| **"Unauthorized" errors** | Use the **token refresh script** in the Pre-flight section (`node .claude/refresh-token.js <wallet>`). Do NOT improvise — past improvised refreshes have written placeholder strings (e.g. `+token+`) into `settings.json`. If you see `+token+` or other obviously-bogus values in `.claude/settings.json`, delete the `DFM_AUTH_TOKEN` entry and re-run the refresh script. |
 | **"Keypair file not found"** | Re-generate wallet (Step 4). Check: `ls -la $AGENT_WALLET_PATH` |
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
 | **Transaction fails on-chain** | Agent Wallet needs SOL for tx fees + USDC for vault creation fee. Fund the wallet first. |
