@@ -751,7 +751,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
 | **Transaction fails on-chain** | Agent Wallet needs SOL for tx fees + USDC for vault creation fee. Fund the wallet first. |
 | **Policy `flagged: true` on rebalance** | Rebalance is non-blocking — the operation already proceeded. Inspect `policyCheck.reviewFlags` to see which rules were violated and surface them to the user as a warning. Same flags are persisted on the latest `RebalancingSuggestion.policyReviewFlags`. |
-| **Token revoked unexpectedly** | A token refresh revokes **all** prior tokens. One active token per agent. |
+| **Token revoked unexpectedly** | Tokens are only invalidated by an explicit `POST /token/revoke` call. Refresh issues a new token without touching existing ones — multiple active tokens per agent are supported. |
 | **409 Conflict on dtf-create** | A policy already exists for this vault name/symbol. Use a unique name and symbol. |
 
 ## Security

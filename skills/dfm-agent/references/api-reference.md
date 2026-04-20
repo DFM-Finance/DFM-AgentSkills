@@ -621,7 +621,7 @@ Revokes the current agent auth token immediately. The token in the `Authorizatio
 
 ## 10. POST `/token/refresh` - Refresh Agent Token [Public]
 
-Re-issues a new agent token using the agent's `profileId`. Revokes **all** existing tokens for the agent. Use this when the current token has expired.
+Issues a new agent token using the agent's `profileId`. **Existing tokens are NOT revoked** — multiple active tokens per agent are supported (each lives for 30 days then is auto-removed by the TTL index). To explicitly invalidate a specific token, use `POST /token/revoke`.
 
 **Request Body:**
 ```json
@@ -648,7 +648,7 @@ Re-issues a new agent token using the agent's `profileId`. Revokes **all** exist
 
 ## 11. POST `/token/refresh-by-wallet` - Refresh Agent Token by Wallet [Public]
 
-Re-issues a new agent token using the wallet address registered on the DFM Dashboard. Revokes **all** existing tokens for the agent. Use this when the current token has expired and you don't have the profileId.
+Issues a new agent token using the wallet address registered on the DFM Dashboard. **Existing tokens are NOT revoked** — multiple active tokens per agent are supported. Use this when you don't have the `profileId` to hand.
 
 **Request Body:**
 ```json
