@@ -131,9 +131,9 @@ Creates a new agent profile linked to an existing user profile. Returns a JWT au
 
 ---
 
-## 2. POST `/launch-dtf` - Build Vault Creation Transaction [Authenticated]
+## 3. POST `/launch-dtf` - Build Vault Creation Transaction (Policy-Gated) [Authenticated]
 
-Builds an unsigned vault creation transaction and returns it as base64. The agent signs it locally, submits on-chain, then calls `POST /dtf-create` with the resulting transaction signature.
+Builds an unsigned vault creation transaction AND commits the constitutional policy in one call. Before producing the transaction, the backend runs the proposed basket against the supplied policy (same rules as `/policy/dry-run`, Section 14). If any rule violates, returns `400` with `violations[]` and **nothing is committed or built** — safe to fix and retry with no on-chain cost.
 
 **Request Body:**
 ```json
@@ -147,11 +147,30 @@ Builds an unsigned vault creation transaction and returns it as base64. The agen
   ],
   "managementFees": 200,
   "category": 0,
-  "threshold": 500
+  "threshold": 500,
+  "policy": {
+    "asset_mode": "OPEN",
+    "asset_whitelist": [],
+    "asset_blacklist": [],
+    "min_amm_liquidity_usd": 100000,
+    "min_24h_volume_usd": 500000,
+    "min_assets": 2,
+    "max_assets": 12,
+    "max_asset_pct": 6000,
+    "min_asset_pct": 500,
+    "min_stablecoin_pct": 0,
+    "max_rebalance_pct": 2500,
+    "min_rebalance_interval_hours": 4,
+    "max_rebalances_per_day": 3,
+    "max_rebalances_per_week": 14,
+    "launch_blackout_hours": 24,
+    "fee_locked": true,
+    "notes": "Auto-generated policy for blue chip strategy"
+  }
 }
 ```
 
-**Required fields:** `signerPublicKey`, `vaultName`, `vaultSymbol`, `underlyingAssets`, `managementFees`
+**Required fields:** `signerPublicKey`, `vaultName`, `vaultSymbol`, `underlyingAssets`, `managementFees`, `policy`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -163,80 +182,9 @@ Builds an unsigned vault creation transaction and returns it as base64. The agen
 | `metadataUri` | string | No | IPFS metadata URI (default: `""`) |
 | `category` | number | No | For agent API launches, use `0` (Manual) only |
 | `threshold` | number/null | No | Rebalance threshold in bps (default: `null`) |
+| `policy` | object | Yes | Constitutional policy (see fields below) |
 
-**Underlying asset rules:**
-- Pass `symbol` or `name` in each `underlyingAssets[]` item (preferred). Backend resolves `mintAddress` from `asset-allocation`.
-- **Minimum 1, maximum 12 assets** in `underlyingAssets`. Payloads outside this range are rejected.
-- Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
-
-**Response (201):**
-```json
-{
-  "onChain": {
-    "transaction": "base64-encoded-unsigned-versioned-transaction...",
-    "vaultIndex": 42,
-    "vaultPda": "7Xk...def",
-    "vaultMintPda": "9Rm...ghi"
-  }
-}
-```
-
-| Field | Description |
-|-------|-------------|
-| `transaction` | Base64-encoded unsigned `VersionedTransaction` -- sign locally and submit on-chain |
-| `vaultIndex` | The vault index assigned by the factory |
-| `vaultPda` | Vault PDA address |
-| `vaultMintPda` | Vault mint PDA address |
-
-**After receiving the response:** Sign the transaction with your local keypair and submit it on-chain. Use the resulting transaction signature in `POST /dtf-create`.
-
-**Errors:** `400` Validation error, USDC blocked, insufficient balance | `404` Asset not found
-
----
-
-## 3. POST `/dtf-create` - Create DTF (Policy + DB Persist) [Authenticated]
-
-Called after the agent has signed and submitted the vault creation transaction on-chain. Creates the constitutional policy and persists the vault to the database.
-
-**Request Body:**
-```json
-{
-  "transactionSignature": "5KzR8vN3xY7mW2pQ...",
-  "vaultName": "Blue Chip Fund",
-  "vaultSymbol": "BCF",
-  "vaultType": "DTF",
-  "description": "A diversified blue chip Solana fund",
-  "tags": ["DeFi", "Blue Chip"],
-  "logoUrl": "",
-  "bannerUrl": "",
-  "asset_mode": "OPEN",
-  "max_asset_pct": 6000,
-  "min_rebalance_interval_hours": 4,
-  "max_rebalances_per_day": 3,
-  "fee_locked": true
-}
-```
-
-**Required fields:** `transactionSignature`, `vaultName`, `vaultSymbol`
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `transactionSignature` | string | Yes | On-chain transaction signature from the signed vault creation tx |
-| `vaultName` | string | Yes | Must match the name used in `launch-dtf` |
-| `vaultSymbol` | string | Yes | Must match the symbol used in `launch-dtf` |
-
-**Optional DB fields:**
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `vaultType` | `"DTF"` / `"YIELD_DTF"` | `"DTF"` | Vault type |
-| `logoUrl` | string | - | Logo image URL (set to `""` for agent launches) |
-| `bannerUrl` | string | - | Banner image URL (set to `""` for agent launches) |
-| `description` | string | - | Vault description |
-| `noRebalance` | boolean | `false` | Disable auto-rebalancing |
-| `tags` | string[] | - | Searchable tags |
-
-**Optional policy fields** (defaults from `policy.json` if omitted):
+**Policy sub-object fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -256,16 +204,105 @@ Called after the agent has signed and submitted the vault creation transaction o
 | `fee_locked` | boolean | `true` | Prevent fee changes |
 | `notes` | string | - | Policy notes |
 
+**Underlying asset rules:**
+- Pass `symbol` or `name` in each `underlyingAssets[]` item (preferred). Backend resolves `mintAddress` from `asset-allocation`.
+- **Minimum 1, maximum 12 assets** in `underlyingAssets`. Payloads outside this range are rejected.
+- Do not include USDC (`symbol: "USDC"` or `name: "USD Coin"`), as backend blocks USDC for agent-created vault launches.
+- Each asset's liquidity/volume (per Jupiter) must meet `policy.min_amm_liquidity_usd` / `policy.min_24h_volume_usd`. Use `GET /market-metrics` (Section 13) to check these numbers before submitting.
+
+**Response (201) - Success:**
+```json
+{
+  "onChain": {
+    "transaction": "base64-encoded-unsigned-versioned-transaction...",
+    "vaultIndex": 42,
+    "vaultPda": "7Xk...def",
+    "vaultMintPda": "9Rm...ghi"
+  },
+  "policyId": "665c..."
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `transaction` | Base64-encoded unsigned `VersionedTransaction` -- sign locally and submit on-chain |
+| `vaultIndex` | The vault index assigned by the factory |
+| `vaultPda` | Vault PDA address |
+| `vaultMintPda` | Vault mint PDA address |
+| `policyId` | Mongo ID of the committed (unlinked) policy |
+
+**Response (400) - Policy Violation:**
+```json
+{
+  "statusCode": 400,
+  "message": "Policy validation failed",
+  "ok": false,
+  "violations": [
+    {
+      "violationCode": "rule2MinAmmLiquidity",
+      "message": "Mint Bonk... has $30000 AMM liquidity; policy requires at least $100000.",
+      "details": { "mint": "Dez...", "observedUsd": 30000, "minUsd": 100000 }
+    },
+    {
+      "violationCode": "rule5MaxPctPerAsset",
+      "message": "Mint JUP... proposed at 80%; policy max is 60%.",
+      "details": { "mint": "JUP..." }
+    }
+  ]
+}
+```
+
+**Every applicable rule is evaluated in a single pass** — all violations are returned together so the agent can fix them in one iteration. See Section 14 for the full list of violation codes and debugging strategy.
+
+**After receiving a successful response:** Sign the transaction with your local keypair and submit it on-chain. Use the resulting transaction signature in `POST /dtf-create`.
+
+**Errors:** `400` Validation error, policy violations (`violations[]`), USDC blocked, insufficient balance | `404` Asset not found | `409` Policy (or vault) already exists for this vault name/symbol
+
+---
+
+## 4. POST `/dtf-create` - Persist Vault to DB (Metadata-Only) [Authenticated]
+
+Called after the agent has signed and submitted the vault creation transaction on-chain. Reads the on-chain event, persists the vault's metadata to the database, and links the policy that was already committed during `/launch-dtf`. **Sends no policy fields.**
+
+**Request Body:**
+```json
+{
+  "transactionSignature": "5KzR8vN3xY7mW2pQ...",
+  "vaultName": "Blue Chip Fund",
+  "vaultSymbol": "BCF",
+  "vaultType": "DTF",
+  "description": "A diversified blue chip Solana fund",
+  "tags": ["DeFi", "Blue Chip"],
+  "logoUrl": "",
+  "bannerUrl": "",
+  "noRebalance": false
+}
+```
+
+**Required fields:** `transactionSignature`, `vaultName`, `vaultSymbol`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `transactionSignature` | string | Yes | On-chain transaction signature from the signed vault creation tx |
+| `vaultName` | string | Yes | Must match the name used in `launch-dtf` |
+| `vaultSymbol` | string | Yes | Must match the symbol used in `launch-dtf` |
+
+**Optional DB fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `vaultType` | `"DTF"` / `"YIELD_DTF"` | `"DTF"` | Vault type |
+| `logoUrl` | string | `""` | Logo image URL (set to `""` for agent launches) |
+| `bannerUrl` | string | `""` | Banner image URL (set to `""` for agent launches) |
+| `description` | string | - | Vault description |
+| `noRebalance` | boolean | `false` | Disable auto-rebalancing |
+| `tags` | string[] | `[]` | Searchable tags |
+
+**Do NOT send policy fields here.** `asset_mode`, `asset_whitelist`, `min_amm_liquidity_usd`, etc. all belong in `/launch-dtf` and are ignored/rejected here.
+
 **Response (201):**
 ```json
 {
-  "policy": {
-    "_id": "665c...",
-    "vault_name": "Blue Chip Fund",
-    "vault_symbol": "BCF",
-    "asset_mode": "OPEN",
-    "agentDTFPolicy": true
-  },
   "vault": [
     {
       "eventType": "VaultCreated",
@@ -276,11 +313,14 @@ Called after the agent has signed and submitted the vault creation transaction o
         "status": "active"
       }
     }
-  ]
+  ],
+  "policyId": "665c..."
 }
 ```
 
-**Errors:** `400` Validation error | `409` Policy already exists for this vault name/symbol
+The returned `policyId` is the policy committed during `/launch-dtf`, now linked to the on-chain vault by the chain-event pipeline.
+
+**Errors:** `400` Validation error, transaction not found, vault DB persist failed | `409` No unlinked policy found for this vault (was `/launch-dtf` called first?)
 
 ---
 
@@ -673,6 +713,166 @@ Issues a new agent token using the wallet address registered on the DFM Dashboar
 
 ---
 
+## 13. GET `/market-metrics` - Bulk Market Metrics [Authenticated]
+
+Returns Jupiter-sourced market metrics for a set of assets — the **authoritative source** for the numbers the policy engine enforces against Rules 2 & 3 (`min_amm_liquidity_usd`, `min_24h_volume_usd`). Use this before building a policy so the thresholds you choose are grounded in the same data the backend sees.
+
+Accepts any combination of `mints`, `symbols`, and `names` as comma-separated query params. Non-mint identifiers are resolved via `asset-allocation`. USDC is blocked.
+
+**Query params:**
+```
+GET /market-metrics?mints=<m1>,<m2>&symbols=SOL,JUP&names=Bonk
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `mints` | CSV of strings | Solana mint addresses (direct — no lookup) |
+| `symbols` | CSV of strings | Token symbols (resolved via `asset-allocation`) |
+| `names` | CSV of strings | Token names (resolved via `asset-allocation`) |
+
+At least one identifier must be provided. Identifiers that fail to resolve are returned in `unresolved[]` — a single bad identifier does not fail the whole request.
+
+**Response (200):**
+```json
+{
+  "metrics": [
+    {
+      "mintAddress": "So11111111111111111111111111111111111111112",
+      "symbol": "SOL",
+      "name": "Wrapped SOL",
+      "liquidity_usd": 691807448.19,
+      "volume_24h_usd": 14648499808.98,
+      "price_usd": 85.33,
+      "holder_count": 3820662,
+      "policyRelevant": {
+        "liquidity_usd": 691807448.19,
+        "volume_24h_usd": 14648499808.98
+      }
+    },
+    {
+      "mintAddress": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "symbol": "Bonk",
+      "name": "Bonk",
+      "liquidity_usd": null,
+      "volume_24h_usd": null,
+      "price_usd": null,
+      "holder_count": null,
+      "policyRelevant": { "liquidity_usd": null, "volume_24h_usd": null }
+    }
+  ],
+  "unresolved": [
+    { "identifier": "FOO", "reason": "Asset not found in asset-allocation" }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `liquidity_usd` | Jupiter AMM liquidity in USD. Compared to `policy.min_amm_liquidity_usd` (Rule 2). |
+| `volume_24h_usd` | Sum of `stats24h.buyVolume + stats24h.sellVolume` from Jupiter. Compared to `policy.min_24h_volume_usd` (Rule 3). |
+| `price_usd` | Current USD price (informational). |
+| `holder_count` | Jupiter holder count (informational). |
+| `policyRelevant` | Subset of the above that the policy engine actually reads — use for policy threshold calibration. |
+
+**`null` values:** indicate a transient Jupiter fetch miss for that mint. Responses are cached per-mint in Redis with a configurable TTL, so retrying the call usually returns live data on the next request.
+
+**Errors:** `400` No identifiers provided | `401` Invalid or missing JWT
+
+---
+
+## 14. POST `/policy/dry-run` - Simulate Policy Evaluation [Authenticated]
+
+Runs a proposed basket + policy against all pre-launch policy rules (asset mode, whitelist/blacklist, min liquidity, min 24h volume, asset count bounds, per-asset allocation bounds) and returns **every** violation in one pass. No DB write, no on-chain cost — use in a tight loop to iterate on basket/policy combinations before calling `/launch-dtf`.
+
+Returns the same evaluation the backend will run server-side during `/launch-dtf`. A clean dry-run means the subsequent `/launch-dtf` with the same basket + policy will pass.
+
+**Request Body:**
+```json
+{
+  "underlyingAssets": [
+    { "symbol": "SOL",  "pct_bps": 4000 },
+    { "symbol": "JUP",  "pct_bps": 3000 },
+    { "name":   "Bonk", "pct_bps": 3000 }
+  ],
+  "policy": {
+    "asset_mode": "OPEN",
+    "asset_whitelist": [],
+    "asset_blacklist": [],
+    "min_amm_liquidity_usd": 100000,
+    "min_24h_volume_usd": 500000,
+    "min_assets": 3,
+    "max_assets": 12,
+    "max_asset_pct": 4000,
+    "min_asset_pct": 500,
+    "min_stablecoin_pct": 0,
+    "max_rebalance_pct": 2500,
+    "min_rebalance_interval_hours": 4,
+    "max_rebalances_per_day": 3,
+    "max_rebalances_per_week": 14,
+    "launch_blackout_hours": 24,
+    "fee_locked": true
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `underlyingAssets` | array | Yes | Proposed basket. Each item has `mintAddress` or `symbol` or `name`, plus `pct_bps`. Must sum to 10000. |
+| `policy` | object | Yes | Same shape as the `policy` sub-object in `/launch-dtf`. |
+
+**Response (200) - Clean:**
+```json
+{
+  "ok": true,
+  "policyCheck": { "ok": true, "violations": [] }
+}
+```
+
+**Response (200) - Violations (note: 200, not 400 — dry-run is evaluation, not rejection):**
+```json
+{
+  "ok": false,
+  "policyCheck": {
+    "ok": false,
+    "violationCode": "rule2MinAmmLiquidity",
+    "violations": [
+      {
+        "violationCode": "rule2MinAmmLiquidity",
+        "message": "Mint Bonk... has $30000 AMM liquidity; policy requires at least $100000.",
+        "details": { "mint": "Dez...", "observedUsd": 30000, "minUsd": 100000 }
+      },
+      {
+        "violationCode": "rule4MinMaxAssetCount",
+        "message": "Proposed 3 distinct assets; policy requires between 5 and 12.",
+        "details": { "distinctAssetCount": 3, "minAllowed": 5, "maxAllowed": 12 }
+      }
+    ]
+  }
+}
+```
+
+**Rules evaluated at pre-launch:**
+
+| Code | Rule | Fix |
+|------|------|-----|
+| `assetModeViolation` | Policy `asset_mode` is invalid | Set to one of `OPEN`, `WHITELIST_ONLY`, `OPEN_BLACKLIST`, `WHITELIST_BLACKLIST`. |
+| `rule1WhitelistBlacklist` | Asset blocked by whitelist/blacklist | Add to `asset_whitelist` or remove from `asset_blacklist`; or swap the asset. |
+| `rule2MinAmmLiquidity` | Asset liquidity < threshold | Lower `min_amm_liquidity_usd` OR swap asset. Check `/market-metrics` for the real number. |
+| `rule3Min24hVolume` | Asset 24h volume < threshold | Lower `min_24h_volume_usd` OR swap asset. |
+| `platformMaxAssetsExceeded` | Over 15 distinct assets | Platform hard cap — reduce basket size. |
+| `rule4MinMaxAssetCount` | Count outside `min_assets` / `max_assets` | Adjust bounds OR basket size. |
+| `rule5MaxPctPerAsset` | A `pct_bps` > `max_asset_pct` | Reduce the allocation OR raise `max_asset_pct`. |
+| `rule6MinPctPerAssetIfHeld` | A held asset's `pct_bps` < `min_asset_pct` | Raise the allocation OR drop the asset. |
+
+Rules 7–11 (stablecoin floor, rebalance limits, launch blackout) apply post-launch and are NOT evaluated here.
+
+**`marketMetricsUnavailable`:** if `min_amm_liquidity_usd > 0` or `min_24h_volume_usd > 0` and Jupiter is unreachable, strict mode fails Rules 2/3 closed. Surface the issue to the user and retry; the Redis cache warms quickly.
+
+**Errors:** `400` Validation error, bps not summing to 10000, USDC in basket | `401` Invalid or missing JWT | `404` Asset not found in asset-allocation
+
+---
+
 ## Architecture
 
 ```
@@ -682,13 +882,25 @@ AgentProfileController
 AgentProfileService
     |
     +-- AgentVaultService (builds unsigned vault creation transactions)
-    +-- PolicyEngineService (constitutional policy CRUD)
+    +-- PolicyEngineService (constitutional policy commit + evaluation;
+    |                        invoked from launchDTF pre-tx, and from dryRun)
+    +-- JupiterMarketMetricsService (Jupiter data + Redis cache; powers
+    |                                /market-metrics and Rules 2/3)
     +-- AgentRebalanceService (rebalancing executed by admin wallet)
     +-- VaultFactoryService (DB vault operations + builds unsigned fee distribution txs)
     +-- VaultManagementFeesService (fee calculation)
     +-- VaultInsightsService (portfolio & holdings)
     +-- VaultRebalancingService (suggestions & history)
-    +-- TxEventManagementService (on-chain tx parsing & DB persistence)
+    +-- TxEventManagementService (on-chain tx parsing; auto-links the
+                                   pre-committed policy to the new vault
+                                   via linkPolicyToVaultByVaultNameAndSymbol)
+```
+
+**Deploy flow (policy-gated):**
+```
+agent basket+policy ──► /policy/dry-run ──(loop)──► /launch-dtf ──► sign+submit ──► /dtf-create
+                           free eval              validates + commits    on-chain      metadata only
+                                                   policy + builds tx                  (policy auto-linked)
 ```
 
 **Signing:**

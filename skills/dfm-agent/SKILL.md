@@ -21,34 +21,46 @@ DFM Agent is a **fully autonomous** AI skill for DTF (DeFi Token Fund) vault man
 **The agent is the creator. It has full authority over what it launches.**
 
 ```
-+----------------------------------------------------------------+
-|                    AUTONOMOUS AGENT FLOW                        |
-|                                                                |
-|  1. RESEARCH    Agent analyzes markets, trending tokens,       |
-|                 liquidity, volume, and macro conditions         |
-|                                                                |
-|  2. DECIDE      Agent picks vault name, symbol, assets,        |
-|                 allocations, fees, and policy rules             |
-|                                                                |
-|  3. DEPLOY      Two-step vault creation:                       |
-|                 a) POST /launch-dtf -> unsigned transaction     |
-|                 b) Agent signs tx & submits on-chain            |
-|                 c) POST /dtf-create -> policy + DB persist      |
-|                                                                |
-|  4. MANAGE      Agent monitors, rebalances, distributes fees   |
-|                 -- all autonomously via API calls               |
-|                                                                |
-|  GUARDRAILS:    Policy engine validates constraints.            |
-|                 Invalid payloads return errors with specifics.  |
-|                 NO human confirmation step.                     |
-+----------------------------------------------------------------+
++-------------------------------------------------------------------+
+|                    AUTONOMOUS AGENT FLOW                           |
+|                                                                   |
+|  1. RESEARCH    Agent analyzes markets, picks candidate tokens    |
+|                 via WebSearch. Then GET /market-metrics for       |
+|                 authoritative liquidity/volume numbers (the       |
+|                 exact values the policy engine enforces against). |
+|                                                                   |
+|  2. DECIDE      Agent picks vault name, symbol, assets,           |
+|                 allocations, fees, and policy thresholds.         |
+|                                                                   |
+|  3. VALIDATE    POST /policy/dry-run (loop) -- simulate the       |
+|                 basket+policy against all pre-launch rules.       |
+|                 No on-chain cost. If violations, adjust policy    |
+|                 OR basket, retry until clean.                     |
+|                                                                   |
+|  4. DEPLOY      Two-step vault creation (policy-gated):           |
+|                 a) POST /launch-dtf {basket + policy} ->          |
+|                    basket-vs-policy validated server-side.        |
+|                    Policy committed. Unsigned tx returned.        |
+|                 b) Agent signs tx & submits on-chain.             |
+|                 c) POST /dtf-create {tx signature + metadata} ->  |
+|                    finalize vault (metadata only, no policy).     |
+|                                                                   |
+|  5. MANAGE      Agent monitors, rebalances, distributes fees.     |
+|                                                                   |
+|  GUARDRAILS:    Policy is law before creation. /launch-dtf        |
+|                 refuses to build a tx for any basket that         |
+|                 violates the agent's own declared policy.         |
+|                 NO human confirmation step.                       |
++-------------------------------------------------------------------+
 ```
 
 | Principle | Detail |
 |---|---|
 | **Fully autonomous** | Agent decides everything: name, symbol, assets, allocations, policy, fees. No confirmation prompts. |
-| **Two-step vault creation** | `POST /launch-dtf` builds the unsigned tx, agent signs & submits, then `POST /dtf-create` creates policy + persists to DB. |
-| **Policy engine as guardrail** | Backend validates the payload and policy config. If valid, it deploys. If not, it returns an error with the specific issue. |
+| **Policy is law before creation** | The `policy` object ships **inside the `/launch-dtf` request body**. Backend runs `evaluatePreCreation` against the basket + policy before building the tx. Violations return `400` with a full `violations[]` array — nothing lands on-chain. |
+| **Pre-flight loop via dry-run** | `POST /policy/dry-run` returns the same evaluation without committing anything. Use it to iterate on policy/basket combinations for free before calling `/launch-dtf`. |
+| **Metrics source of truth** | `GET /market-metrics` returns the exact `liquidity_usd` / `volume_24h_usd` numbers the policy engine will enforce. Use these values (not aggregator numbers scraped from the web) when choosing `min_amm_liquidity_usd` / `min_24h_volume_usd`. |
+| **Two-step vault creation** | `POST /launch-dtf` validates + commits policy + builds unsigned tx. Agent signs + submits. `POST /dtf-create` persists on-chain metadata to DB (no policy — that was already committed and is linked automatically by the chain-event pipeline). |
 | **Non-custodial** | Agent Wallet private key never leaves the user's machine. Backend never receives secret keys. |
 | **Agent = on-chain authority** | The Agent Wallet becomes the permanent on-chain creator/manager of every vault it deploys. |
 
@@ -363,12 +375,11 @@ When the user asks you to launch a DTF (e.g. "Create a blue chip Solana fund" or
 
 ### Step 1: Research (Agent decides)
 
-Use `WebSearch` and `WebFetch` tools for ALL DTF-related metadata -- token discovery, prices, market caps, volume, liquidity, mint addresses, trending assets, and market conditions. No exceptions.
+Use `WebSearch` and `WebFetch` for **token discovery** — prices, market caps, mint addresses, trending assets, macro conditions. Then use `GET /market-metrics` as the **authoritative source** for the two numbers the policy engine actually enforces (Rule 2 liquidity, Rule 3 24h volume). Aggregator scrape values often disagree with what the backend sees; `/market-metrics` is Jupiter data queried through the same pipeline the evaluator uses, so the numbers match exactly.
 
 Use `WebSearch` to find:
 - Top performing Solana tokens by market cap, volume, and price action
 - Current market conditions, trends, and sentiment
-- Token liquidity and 24h trading volume data
 - **For yield DTFs**: Solana LSTs (liquid staking tokens) and yield-bearing tokens — mSOL, jitoSOL, bSOL, INF, hSOL, stSOL, and their current APYs, TVLs, and staking yields
 
 Use `WebFetch` to pull data from:
@@ -376,11 +387,44 @@ Use `WebFetch` to pull data from:
 - Solana token lists and verified registries for mint addresses
 - **For yield DTFs**: Staking yield aggregators, LST protocol sites (Marinade, Jito, BlazeStake, Sanctum), and DeFi yield dashboards
 
+**Then call `GET {DFM_API_URL}/api/v2/agent/market-metrics`** with the candidate assets (mints, symbols, or names) to get the exact policy-relevant numbers:
+
+```
+GET /api/v2/agent/market-metrics?symbols=SOL,JUP&names=Bonk
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+Response:
+```json
+{
+  "metrics": [
+    {
+      "mintAddress": "So11111111111111111111111111111111111111112",
+      "symbol": "SOL",
+      "name": "Wrapped SOL",
+      "liquidity_usd": 691807448.19,
+      "volume_24h_usd": 14648499808.98,
+      "price_usd": 85.33,
+      "holder_count": 3820662,
+      "policyRelevant": {
+        "liquidity_usd": 691807448.19,
+        "volume_24h_usd": 14648499808.98
+      }
+    }
+  ],
+  "unresolved": []
+}
+```
+
+Use these numbers to:
+- **Drop candidates that don't meet the strategy's floor** (e.g. reject an asset with `liquidity_usd < 50000` for an aggressive fund).
+- **Calibrate `min_amm_liquidity_usd` and `min_24h_volume_usd`** in the policy below the weakest selected asset's real number — setting the floor above an included asset guarantees a policy violation the agent can't self-heal later (the asset gets "locked" in the basket).
+- **Null values** in `policyRelevant` indicate a transient Jupiter fetch miss; retry after a cache warm-up (the endpoint caches per mint).
+
 Then decide:
 - Identify candidate tokens based on the user's intent or strategy
-- Check token liquidity, 24h volume, market cap
 - **For yield DTFs**: Prioritize LSTs and yield-bearing assets with highest APY and deepest liquidity
-- Select the best tokens and determine allocations
+- Select the final basket and determine allocations
 - Automatically discover each token's Solana `mintAddress` from reliable references (official docs, verified token lists, explorers, major data providers)
 - Cross-check mint addresses across multiple references before including them in `underlyingAssets`
 - Reject unverified, conflicting, or low-confidence mint mappings and replace them with verified assets
@@ -400,11 +444,72 @@ Based on your research, autonomously decide:
 - **Description** -- strategy summary
 - **Launch media fields** -- for DTF launch payloads, set `logoUrl`, `bannerUrl`, and `metadataUri` to empty strings.
 
-### Step 3: Deploy (Two-step flow)
+### Step 3: Validate (Pre-flight dry-run)
 
-#### 3a. Build the unsigned transaction
+Before calling `/launch-dtf`, run the proposed basket + policy through `POST /policy/dry-run`. This is **free** (no DB write, no on-chain cost) and returns every violation at once so the agent can fix them in one pass. **Loop until `ok: true` or `violations: []`.**
 
-Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payload. The backend builds and returns an unsigned transaction.
+```bash
+POST {DFM_API_URL}/api/v2/agent/policy/dry-run
+Authorization: Bearer <DFM_AUTH_TOKEN>
+
+{
+  "underlyingAssets": [
+    { "symbol": "SOL",  "pct_bps": 4000 },
+    { "symbol": "JUP",  "pct_bps": 3000 },
+    { "name":   "Bonk", "pct_bps": 3000 }
+  ],
+  "policy": {
+    "asset_mode": "OPEN",
+    "min_amm_liquidity_usd": 100000,
+    "min_24h_volume_usd": 500000,
+    "min_assets": 3,
+    "max_assets": 12,
+    "max_asset_pct": 4000,
+    "min_asset_pct": 500
+  }
+}
+```
+
+Clean response (proceed to Step 4):
+```json
+{ "ok": true, "policyCheck": { "ok": true, "violations": [] } }
+```
+
+Flagged response — **all** violations returned together:
+```json
+{
+  "ok": false,
+  "policyCheck": {
+    "ok": false,
+    "violations": [
+      {
+        "violationCode": "rule2MinAmmLiquidity",
+        "message": "Mint Bonk... has $30000 AMM liquidity; policy requires at least $100000.",
+        "details": { "mint": "Dez...", "observedUsd": 30000, "minUsd": 100000 }
+      },
+      {
+        "violationCode": "rule4MinMaxAssetCount",
+        "message": "Proposed 3 distinct assets; policy requires between 5 and 12.",
+        "details": { "distinctAssetCount": 3, "minAllowed": 5, "maxAllowed": 12 }
+      }
+    ]
+  }
+}
+```
+
+**Fix strategy (priority order):**
+1. `rule2MinAmmLiquidity` / `rule3Min24hVolume` → lower the policy threshold (if the asset is strategy-critical) OR swap the asset out. Don't set the threshold above what `/market-metrics` reports for any included asset.
+2. `rule4MinMaxAssetCount` → adjust basket size OR the `min_assets`/`max_assets` bounds.
+3. `rule5MaxPctPerAsset` / `rule6MinPctPerAssetIfHeld` → rebalance the `pct_bps` allocations.
+4. `rule1WhitelistBlacklist` / `assetModeViolation` → fix `asset_mode`, `asset_whitelist`, or `asset_blacklist`.
+
+**Re-run dry-run after every fix.** Only proceed to `/launch-dtf` once dry-run returns clean. Max ~3 iterations in practice; if you can't converge, surface the blocker to the user before incurring on-chain costs.
+
+### Step 4: Deploy (Two-step flow — policy-gated)
+
+#### 4a. Build the unsigned transaction (with policy)
+
+Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payload **AND the policy**. Backend runs the same pre-creation evaluation as `/policy/dry-run`, commits the policy (unlinked, keyed by vault_name + vault_symbol), and returns the unsigned tx. If any rule violates, it returns `400` with the full `violations[]` — **no tx is built and nothing lands on-chain**, so the agent can fix and retry.
 
 ```json
 {
@@ -418,11 +523,30 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payloa
   ],
   "managementFees": 200,
   "category": 0,
-  "threshold": 500
+  "threshold": 500,
+  "policy": {
+    "asset_mode": "OPEN",
+    "asset_whitelist": [],
+    "asset_blacklist": [],
+    "min_amm_liquidity_usd": 100000,
+    "min_24h_volume_usd": 500000,
+    "min_assets": 3,
+    "max_assets": 12,
+    "max_asset_pct": 4000,
+    "min_asset_pct": 500,
+    "min_stablecoin_pct": 0,
+    "max_rebalance_pct": 2500,
+    "min_rebalance_interval_hours": 4,
+    "max_rebalances_per_day": 3,
+    "max_rebalances_per_week": 14,
+    "launch_blackout_hours": 24,
+    "fee_locked": true,
+    "notes": "Auto-generated policy for blue chip strategy"
+  }
 }
 ```
 
-The response contains:
+Successful response:
 ```json
 {
   "onChain": {
@@ -430,11 +554,24 @@ The response contains:
     "vaultIndex": 42,
     "vaultPda": "7Xk...def",
     "vaultMintPda": "9Rm...ghi"
-  }
+  },
+  "policyId": "665c..."
 }
 ```
 
-#### 3b. Sign and submit the transaction on-chain
+Policy-violation response (400) — **same shape as dry-run**:
+```json
+{
+  "statusCode": 400,
+  "message": "Policy validation failed",
+  "ok": false,
+  "violations": [
+    { "violationCode": "rule2MinAmmLiquidity", "message": "...", "details": {...} }
+  ]
+}
+```
+
+#### 4b. Sign and submit the transaction on-chain
 
 Use the agent's local keypair to sign the returned transaction and submit it to Solana:
 
@@ -461,15 +598,13 @@ const signature = await connection.sendRawTransaction(tx.serialize(), {
 await connection.confirmTransaction(signature, "confirmed");
 ```
 
-#### 3c. Create policy and persist to DB
+#### 4c. Persist vault metadata to DB
 
-After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/dtf-create` with the transaction signature and policy configuration:
-
-**You MUST include ALL policy fields in every `dtf-create` payload.** The agent decides values based on the vault strategy. Missing fields default to 0/disabled which means no policy guardrails.
+After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/dtf-create` with the transaction signature and **metadata only**. Policy was already committed during `/launch-dtf` and is linked to the new vault automatically by the chain-event pipeline. Do **not** send policy fields here — they are rejected.
 
 ```json
 {
-  "transactionSignature": "<signature from step 3b>",
+  "transactionSignature": "<signature from step 4b>",
   "vaultName": "Solana Blue Chips",
   "vaultSymbol": "SOLBC",
   "vaultType": "DTF",
@@ -477,27 +612,70 @@ After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/d
   "tags": ["Blue Chip", "Solana", "DeFi"],
   "logoUrl": "",
   "bannerUrl": "",
-  "asset_mode": "OPEN",
-  "asset_whitelist": [],
-  "asset_blacklist": [],
-  "min_amm_liquidity_usd": 100000,
-  "min_24h_volume_usd": 500000,
-  "min_assets": 3,
-  "max_assets": 12,
-  "max_asset_pct": 4000,
-  "min_asset_pct": 500,
-  "min_stablecoin_pct": 0,
-  "max_rebalance_pct": 2500,
-  "min_rebalance_interval_hours": 4,
-  "max_rebalances_per_day": 3,
-  "max_rebalances_per_week": 14,
-  "launch_blackout_hours": 24,
-  "fee_locked": true,
-  "notes": "Auto-generated policy for blue chip strategy"
+  "noRebalance": false
 }
 ```
 
-**Example: WHITELIST mode (for curated LST yield fund):**
+Successful response:
+```json
+{
+  "vault": [
+    {
+      "eventType": "VaultCreated",
+      "vault": {
+        "vaultName": "Solana Blue Chips",
+        "vaultSymbol": "SOLBC",
+        "vaultIndex": 42,
+        "status": "active"
+      }
+    }
+  ],
+  "policyId": "665c..."
+}
+```
+
+**Example: WHITELIST mode (for curated LST yield fund)** — the policy fields move to `/launch-dtf`. `/dtf-create` still only carries metadata:
+
+Step 4a `/launch-dtf` body (policy for curated LST fund):
+```json
+{
+  "signerPublicKey": "<agent pubkey>",
+  "vaultName": "Solana LST Yield",
+  "vaultSymbol": "SLSTY",
+  "underlyingAssets": [
+    { "symbol": "mSOL", "mintBps": 4000 },
+    { "symbol": "jitoSOL", "mintBps": 3500 },
+    { "symbol": "bSOL", "mintBps": 2500 }
+  ],
+  "managementFees": 150,
+  "category": 0,
+  "policy": {
+    "asset_mode": "WHITELIST_ONLY",
+    "asset_whitelist": [
+      "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+      "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
+      "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1"
+    ],
+    "asset_blacklist": [],
+    "min_amm_liquidity_usd": 500000,
+    "min_24h_volume_usd": 500000,
+    "min_assets": 2,
+    "max_assets": 8,
+    "max_asset_pct": 5000,
+    "min_asset_pct": 1000,
+    "min_stablecoin_pct": 0,
+    "max_rebalance_pct": 2000,
+    "min_rebalance_interval_hours": 12,
+    "max_rebalances_per_day": 1,
+    "max_rebalances_per_week": 5,
+    "launch_blackout_hours": 24,
+    "fee_locked": true,
+    "notes": "Whitelisted LST-only yield fund"
+  }
+}
+```
+
+Step 4c `/dtf-create` body (metadata only):
 ```json
 {
   "transactionSignature": "<signature>",
@@ -508,29 +686,13 @@ After the on-chain transaction confirms, send `POST {DFM_API_URL}/api/v2/agent/d
   "tags": ["Yield", "LST", "Staking", "Solana"],
   "logoUrl": "",
   "bannerUrl": "",
-  "asset_mode": "WHITELIST_ONLY",
-  "asset_whitelist": ["mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1"],
-  "asset_blacklist": [],
-  "min_amm_liquidity_usd": 500000,
-  "min_24h_volume_usd": 500000,
-  "min_assets": 2,
-  "max_assets": 8,
-  "max_asset_pct": 5000,
-  "min_asset_pct": 1000,
-  "min_stablecoin_pct": 0,
-  "max_rebalance_pct": 2000,
-  "min_rebalance_interval_hours": 12,
-  "max_rebalances_per_day": 1,
-  "max_rebalances_per_week": 5,
-  "launch_blackout_hours": 24,
-  "fee_locked": true,
-  "notes": "Whitelisted LST-only yield fund — only approved liquid staking tokens allowed"
+  "noRebalance": false
 }
 ```
 
 #### Policy field decision guide
 
-The agent MUST decide ALL policy values based on the vault strategy:
+The agent MUST decide ALL policy values based on the vault strategy. **These values go into the `policy` sub-object of `/launch-dtf` (Step 4a) — not into `/dtf-create`.** Calibrate the liquidity/volume floors below the weakest selected asset's `/market-metrics` number to avoid locking an asset in violation of the vault's own policy.
 
 | Strategy Type | `max_asset_pct` | `min_asset_pct` | `min_amm_liquidity_usd` | `min_24h_volume_usd` | `max_rebalances_per_day` | `min_rebalance_interval_hours` |
 |---|---|---|---|---|---|---|
@@ -556,15 +718,18 @@ Always set:
 
 #### Backend payload rules
 
-For DTF launch payloads:
+For `/launch-dtf` payloads:
 - `category: 0` (Manual) for agent-created vaults.
 - In `underlyingAssets`, send `symbol` or `name` (preferred). Backend resolves `mintAddress` from `asset-allocation`.
 - Hard restriction: never include USDC (`symbol: "USDC"` or `name: "USD Coin"`) in `underlyingAssets`.
 - If a candidate list contains USDC, remove it and replace it with another eligible non-USDC asset before sending `launch-dtf`.
 - **Asset count: minimum 1, maximum 12 assets** in `underlyingAssets`. The backend rejects payloads outside this range.
+- **`policy` object is REQUIRED**. Include every field the agent wants enforced. Omitted fields default to 0/disabled.
+- The basket in `underlyingAssets` is evaluated against `policy` server-side (same rules as `/policy/dry-run`). If any rule fails, `/launch-dtf` returns `400` with `violations[]` and no tx is built.
 
-For `dtf-create` payloads:
-- **Include ALL policy fields** — do not omit any. The agent decides values autonomously.
+For `/dtf-create` payloads:
+- **METADATA ONLY.** Do NOT send any policy fields (`asset_mode`, `asset_whitelist`, `min_amm_liquidity_usd`, etc.). The policy is already committed during `/launch-dtf` and linked automatically.
+- Keep only: `transactionSignature`, `vaultName`, `vaultSymbol`, `vaultType`, `description`, `tags`, `logoUrl`, `bannerUrl`, `noRebalance`.
 - Set `vaultType`: `"DTF"` for standard funds, `"YIELD_DTF"` for yield/LST funds.
 - Set `logoUrl`, `bannerUrl` to empty strings.
 - `vaultName` and `vaultSymbol` must match what was used in `launch-dtf`.
@@ -603,15 +768,17 @@ const sig = await signAndSendTransaction(response.onChain.transaction, keypair, 
 
 1. **NEVER call `launch-dtf` again after a transaction has been signed and submitted on-chain.** The on-chain vault creation is irreversible and costs USDC. If `dtf-create` fails, only retry `dtf-create` with the SAME transaction signature, vault name, and symbol. Do NOT generate a new name/symbol or call `launch-dtf` again.
 
-2. **If `launch-dtf` fails** (before any on-chain submission): you MAY retry `launch-dtf` with adjusted payload (fix the error).
+2. **If `launch-dtf` returns 400 with policy `violations[]`** (before any on-chain submission): no policy was committed, no tx was built, no on-chain cost was incurred. Fix the basket OR policy per the violation codes (same guidance as Step 3 dry-run) and retry `launch-dtf`. Consider running `/policy/dry-run` first to iterate cheaply.
 
-3. **If signing/submission fails**: you MAY retry `launch-dtf` to get a new unsigned transaction (the previous one was never submitted, so no on-chain cost).
+3. **If `launch-dtf` fails for other reasons** (e.g. validation error, asset not found, insufficient USDC): fix the payload and retry `launch-dtf` — still no on-chain cost since the tx hasn't been built.
 
-4. **If `dtf-create` fails** (after successful on-chain submission): ONLY retry `dtf-create` with the exact same `transactionSignature`, `vaultName`, and `vaultSymbol`. NEVER change these values. NEVER call `launch-dtf` again.
+4. **If signing/submission fails**: you MAY retry `launch-dtf` to get a new unsigned transaction. The policy was already committed on the first call — **reuse the exact same `vaultName` and `vaultSymbol`** so the existing unlinked policy is picked up (changing them would commit a second policy with a different name).
 
-5. **Keep the transaction signature**: after a successful on-chain submission, store the signature and reuse it for all `dtf-create` retries. This is the link between the on-chain vault and the database record.
+5. **If `dtf-create` fails** (after successful on-chain submission): ONLY retry `dtf-create` with the exact same `transactionSignature`, `vaultName`, and `vaultSymbol`. NEVER change these values. NEVER call `launch-dtf` again. The policy is already committed and will be linked by the chain-event pipeline regardless.
 
-### Step 4: Manage (Ongoing, autonomous)
+6. **Keep the transaction signature**: after a successful on-chain submission, store the signature and reuse it for all `dtf-create` retries. This is the link between the on-chain vault and the database record.
+
+### Step 5: Manage (Ongoing, autonomous)
 
 After launch, the agent autonomously:
 - Monitors vault state via `GET {DFM_API_URL}/api/v2/agent/dtf/:symbol/state`
@@ -809,8 +976,10 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Action | Method | Endpoint | Auth | Body |
 |---|---|---|---|---|
 | Launch agent profile | `POST` | `/profile-launch` | No | `userPublicKey` + `agentWalletAddress` + name/username |
-| Build vault tx | `POST` | `/launch-dtf` | JWT | `signerPublicKey` + vault config |
-| Create DTF (policy + DB) | `POST` | `/dtf-create` | JWT | `transactionSignature` + policy config |
+| **Bulk market metrics** | `GET` | `/market-metrics?mints=...&symbols=...&names=...` | JWT | query params |
+| **Dry-run policy** | `POST` | `/policy/dry-run` | JWT | `underlyingAssets` + `policy` |
+| Build vault tx (policy-gated) | `POST` | `/launch-dtf` | JWT | `signerPublicKey` + vault config **+ policy** |
+| Finalize DTF (metadata only) | `POST` | `/dtf-create` | JWT | `transactionSignature` + vault metadata |
 | My vaults | `GET` | `/dtf/my-vaults` | JWT | - |
 | Vault state | `GET` | `/dtf/:symbol/state` | JWT | - |
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
@@ -836,8 +1005,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | What you say | What the agent does |
 |---|---|
 | `Set up my DFM agent` | Asks for wallet address, creates agent profile via `/profile-launch`, saves auth token, generates keypair |
-| `Launch a Solana blue chip fund` | Researches top SOL tokens, picks name/symbol/allocations/policy, builds tx, signs, submits, creates policy |
-| `Create a meme token DTF with 3% fee` | Finds trending meme tokens, builds diversified allocation, sets policy, deploys |
+| `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
+| `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
 | `Show me the state of SOLBC` | `GET /dtf/SOLBC/state` -- returns APY, TVL, NAV, portfolio |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
@@ -848,12 +1017,15 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Problem | Fix |
 |---|---|
 | **"Unauthorized" errors** | Use the **token refresh script** in the Pre-flight section (`node .claude/refresh-token.js <wallet>`). Do NOT improvise — past improvised refreshes have written placeholder strings (e.g. `+token+`) into `settings.json`. If you see `+token+` or other obviously-bogus values in `.claude/settings.json`, delete the `DFM_AUTH_TOKEN` entry and re-run the refresh script. |
+| **`/launch-dtf` returns 400 with `violations[]`** | Policy validation failed — nothing landed on-chain. Read every violation in the array and fix in one pass (adjust `policy` thresholds, swap assets, or rebalance `pct_bps`). Run `/policy/dry-run` to iterate cheaply. Only retry `/launch-dtf` once dry-run is clean. |
+| **`/policy/dry-run` keeps returning the same violation** | Likely a mismatch between the `min_amm_liquidity_usd` / `min_24h_volume_usd` in the policy and the `/market-metrics` numbers for the weakest included asset. Either lower the threshold below the asset's real number, or drop/swap the asset. Do NOT set thresholds above what an included asset actually has — the asset will be perma-flagged. |
+| **`/market-metrics` returns null values for some assets** | Transient Jupiter fetch miss. Retry the call; the service caches per mint so the second call usually succeeds. If persistent, drop the asset — the policy engine can't validate Rule 2/3 for it either. |
 | **"Keypair file not found"** | Re-generate wallet (Step 4). Check: `ls -la $AGENT_WALLET_PATH` |
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
 | **Transaction fails on-chain** | Agent Wallet needs SOL for tx fees + USDC for vault creation fee. Fund the wallet first. |
 | **Policy `flagged: true` on rebalance** | Rebalance is non-blocking — the operation already proceeded. Inspect `policyCheck.reviewFlags` to see which rules were violated and surface them to the user as a warning. Same flags are persisted on the latest `RebalancingSuggestion.policyReviewFlags`. |
 | **Token revoked unexpectedly** | Tokens are only invalidated by an explicit `POST /token/revoke` call. Refresh issues a new token without touching existing ones — multiple active tokens per agent are supported. |
-| **409 Conflict on dtf-create** | A policy already exists for this vault name/symbol. Use a unique name and symbol. |
+| **409 Conflict on launch-dtf** | A policy (or vault) already exists for this name/symbol. Use a unique pair. Note: the 409 now fires at `/launch-dtf` (policy commit), not `/dtf-create`. |
 
 ## Security
 
