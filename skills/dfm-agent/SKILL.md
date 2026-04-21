@@ -861,8 +861,8 @@ When `policyCheck.flagged` is `true`:
 ```bash
 # -- DFM Agent Configuration -------------------------------------------
 
-# API base URL
-export DFM_API_URL="https://api.qa.dfm.finance"
+# API base URL (REQUIRED — no fallback. Agent refuses to run if unset.)
+export DFM_API_URL="http://0.0.0.0:3400"
 
 # Path where the Agent Wallet keypair is stored locally
 export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
