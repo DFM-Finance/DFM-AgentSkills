@@ -251,8 +251,9 @@ req.end();
 3. Once the user provides the wallet address and the agent keypair exists, **auto-generate** the agent profile name and username:
    - Name: generate a creative agent name (e.g. "Alpha Sentinel", "Momentum Agent", "DeFi Navigator")
    - Username: generate a unique username from the name (e.g. "alpha_sentinel", "momentum_agent")
+   - **Don't worry about pre-checking uniqueness** — the `profile-launch.js` script auto-retries with a random 4-char hex suffix on any `409 "Username is already taken"` from the backend (up to 5 attempts). Just pass a sensible base name/username; the script handles collisions silently.
 
-4. **Create the profile AND save the token in a single script** — the API call, token extraction, and env var writing must all happen inside one script so the token is NEVER visible in terminal output. Write a script file and execute it:
+4. **Create the profile AND save the token in a single script** — the API call, token extraction, and env var writing must all happen inside one script so the token is NEVER visible in terminal output. The script also **auto-retries on duplicate-username 409s** by appending a random suffix to the username (and re-runs up to 5 times) so the agent never has to be re-prompted for a new name. Write a script file and execute it:
 
    Write a file called `.claude/profile-launch.js` with this content, then run it with `node .claude/profile-launch.js`:
 
@@ -262,39 +263,82 @@ req.end();
    const fs = require("fs");
    const path = require("path");
    const os = require("os");
+   const crypto = require("crypto");
    const { Keypair } = require("@solana/web3.js");
    const bs58 = require("bs58").default || require("bs58");
 
    const apiUrl = process.env.DFM_API_URL;
    const walletAddress = process.argv[2];
-   const agentName = process.argv[3];
-   const agentUsername = process.argv[4];
+   const baseName = process.argv[3];
+   const baseUsername = process.argv[4];
+
+   if (!apiUrl) { console.log("ERROR: DFM_API_URL not set"); process.exit(1); }
+   if (!walletAddress || !baseName || !baseUsername) {
+     console.log("ERROR: usage: node profile-launch.js <walletAddress> <name> <username>");
+     process.exit(1);
+   }
 
    // Derive agent wallet public key from DFM_AGENT_KEYPAIR
    const agentKeypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
    const agentWalletAddress = agentKeypair.publicKey.toBase58();
 
-   const payload = JSON.stringify({
-     userPublicKey: walletAddress,
-     agentWalletAddress: agentWalletAddress,
-     name: agentName,
-     username: agentUsername,
-     metadata: [{ key: "created_by", value: "dfm-agent-skill" }]
-   });
+   const MAX_ATTEMPTS = 5;
+   const UNAME_RX = /username/i; // disambiguates duplicate-username vs. wallet-already-has-agent
 
-   const url = new URL(apiUrl + "/api/v2/agent/profile-launch");
-   const client = url.protocol === "https:" ? https : http;
+   // Sanitize base username to allowed charset (alphanumeric + underscore)
+   const sanitize = (s) => s.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+   const cleanBase = sanitize(baseUsername) || "agent";
 
-   const req = client.request(url, {
-     method: "POST",
-     headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
-   }, (res) => {
-     let data = "";
-     res.on("data", (chunk) => data += chunk);
-     res.on("end", () => {
-       try {
-         const json = JSON.parse(data);
-         const token = json.data?.token?.token;
+   // Suffix generator: deterministic-looking but unique. 4 hex chars = 65k combos.
+   const suffix = () => crypto.randomBytes(2).toString("hex");
+
+   function attempt(usernameToTry, agentNameToTry, n) {
+     const payload = JSON.stringify({
+       userPublicKey: walletAddress,
+       agentWalletAddress: agentWalletAddress,
+       name: agentNameToTry,
+       username: usernameToTry,
+       metadata: [{ key: "created_by", value: "dfm-agent-skill" }]
+     });
+
+     const url = new URL(apiUrl + "/api/v2/agent/profile-launch");
+     const client = url.protocol === "https:" ? https : http;
+
+     const req = client.request(url, {
+       method: "POST",
+       headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+     }, (res) => {
+       let data = "";
+       res.on("data", (chunk) => data += chunk);
+       res.on("end", () => {
+         let json = null;
+         try { json = JSON.parse(data); } catch { /* fall through */ }
+         const message = json?.message || json?.error || data;
+
+         // 409 + duplicate-username -> regenerate username, retry. Do NOT retry on
+         // "agent profile already exists for this wallet" — that is unrecoverable here.
+         if (res.statusCode === 409 && UNAME_RX.test(String(message)) && !/wallet/i.test(String(message))) {
+           if (n >= MAX_ATTEMPTS) {
+             console.log("ERROR: username conflicts after " + MAX_ATTEMPTS + " attempts. Last tried: " + usernameToTry);
+             process.exit(1);
+           }
+           const nextUsername = cleanBase + "_" + suffix();
+           const nextName = baseName; // keep display name; only username needs to be unique
+           console.log("RETRY=username_taken attempt=" + (n + 1) + " next_username=" + nextUsername);
+           return attempt(nextUsername, nextName, n + 1);
+         }
+
+         if (res.statusCode === 409) {
+           console.log("ERROR: 409 Conflict (not username-related): " + message);
+           process.exit(1);
+         }
+
+         if (res.statusCode < 200 || res.statusCode >= 300) {
+           console.log("ERROR: HTTP " + res.statusCode + ": " + message);
+           process.exit(1);
+         }
+
+         const token = json?.data?.token?.token;
          if (!token) { console.log("ERROR: No token in response. Response: " + data); process.exit(1); }
 
          // Write to .claude/settings.json
@@ -319,24 +363,34 @@ req.end();
          fs.writeFileSync(zshrcPath, zshrc);
 
          // Only output safe info — NEVER the token
-         const profileName = json.data?.agentProfile?.name || agentName;
-         const profileUsername = json.data?.agentProfile?.username || agentUsername;
+         const profileName = json.data?.agentProfile?.name || agentNameToTry;
+         const profileUsername = json.data?.agentProfile?.username || usernameToTry;
          console.log("STATUS=success");
          console.log("AGENT_NAME=" + profileName);
          console.log("AGENT_USERNAME=" + profileUsername);
          console.log("AGENT_WALLET=" + agentWalletAddress);
+         console.log("ATTEMPTS=" + n);
          console.log("DFM_AUTH_TOKEN=set");
-       } catch (e) { console.log("ERROR: " + e.message); process.exit(1); }
+       });
      });
-   });
-   req.on("error", (e) => { console.log("ERROR: " + e.message); process.exit(1); });
-   req.write(payload);
-   req.end();
+     req.on("error", (e) => { console.log("ERROR: " + e.message); process.exit(1); });
+     req.write(payload);
+     req.end();
+   }
+
+   attempt(cleanBase, baseName, 1);
    ```
 
    Run it as: `node .claude/profile-launch.js <WALLET_ADDRESS> "<AGENT_NAME>" "<AGENT_USERNAME>"`
 
-   The script derives `agentWalletAddress` from `DFM_AGENT_KEYPAIR` automatically and includes it in the payload. It outputs ONLY `STATUS=success`, `AGENT_NAME=...`, `AGENT_USERNAME=...`, `AGENT_WALLET=...`, and `DFM_AUTH_TOKEN=set`. The actual token value is written directly to `.claude/settings.json` and `~/.zshrc` — it NEVER appears in terminal output.
+   The script derives `agentWalletAddress` from `DFM_AGENT_KEYPAIR` automatically and includes it in the payload. It outputs ONLY `STATUS=success`, `AGENT_NAME=...`, `AGENT_USERNAME=...`, `AGENT_WALLET=...`, `ATTEMPTS=<n>`, and `DFM_AUTH_TOKEN=set`. The actual token value is written directly to `.claude/settings.json` and `~/.zshrc` — it NEVER appears in terminal output.
+
+   **Username conflict retry behavior:**
+   - On HTTP `409` whose message references "username" (e.g. `"Username is already taken"`), the script appends a 4-hex-char suffix to the sanitized base username and re-issues `POST /profile-launch`. Up to **5 attempts**.
+   - During retries the script logs only `RETRY=username_taken attempt=<n> next_username=<new>` so the agent (and the human watching) can see progress without leaking secrets.
+   - The display `name` is preserved across retries — only `username` changes.
+   - On HTTP `409` whose message references "wallet" (e.g. `"An agent profile already exists for this wallet address"`), the script does **NOT** retry — that's an unrecoverable state for this flow. The agent should call `/token/refresh-by-wallet` instead.
+   - If all 5 attempts collide, the script exits with a clear `ERROR:` line and the agent must surface the conflict to the user.
 
 5. Tell the user: "Agent profile created! Restart your AI agent to pick up the auth token, then you're ready to go."
 
@@ -854,6 +908,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Policy `flagged: true` on rebalance** | Rebalance is non-blocking — the operation already proceeded. Inspect `policyCheck.reviewFlags` to see which rules were violated and surface them to the user as a warning. Same flags are persisted on the latest `RebalancingSuggestion.policyReviewFlags`. |
 | **Token revoked unexpectedly** | Tokens are only invalidated by an explicit `POST /token/revoke` call. Refresh issues a new token without touching existing ones — multiple active tokens per agent are supported. |
 | **409 Conflict on dtf-create** | A policy already exists for this vault name/symbol. Use a unique name and symbol. |
+| **409 "Username is already taken" on profile-launch** | The `profile-launch.js` script auto-retries up to 5 times with a random 4-char hex suffix appended to the sanitized base username. If you see this error surface to the user, the script ran out of retries — pick a more distinctive base username and re-run. |
+| **409 "An agent profile already exists for this wallet address" on profile-launch** | The wallet has already been onboarded — do **NOT** call `profile-launch` again (and the script does not retry on this 409). Use `node .claude/refresh-token.js <WALLET_ADDRESS>` to issue a fresh JWT for the existing agent profile instead. |
 
 ## Security
 
