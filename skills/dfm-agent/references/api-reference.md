@@ -781,6 +781,142 @@ At least one identifier must be provided. Identifiers that fail to resolve are r
 
 ---
 
+## 12a. GET `/vaults/featured/list` - List Featured Vaults [Authenticated]
+
+Returns a paginated list of featured vaults across the platform. Filterable by vault type, with optional TVL data hydration.
+
+**Query params:**
+
+```
+GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `page` | number | `1` | Page number (1-indexed) |
+| `limit` | number | `10` | Items per page |
+| `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
+| `includeTvl` | boolean | `true` | Hydrate response with `totalValueLocked`, `nav`, `sharePrice` |
+
+**Response (200):**
+```json
+{
+  "data": [
+    {
+      "_id": "6983c090ff8f3d8a0f99626f",
+      "vaultName": "Agentonomy",
+      "vaultSymbol": "AGE-DTF",
+      "vaultAddress": "FdxUo6tGcpAAaDcB9771X4dywjFVJG8o972xSKoKtp8B",
+      "description": "AI agent tokens basket designed for narrative exposure...",
+      "vaultIndex": 53,
+      "tags": ["AI-agents", "agent-economy", "high-beta"],
+      "nav": "0",
+      "totalSupply": "0",
+      "feeConfig": { "managementFeeBps": 150 },
+      "underlyingAssets": [
+        {
+          "assetAllocation": {
+            "_id": "68ca86b973a7083867c6d386",
+            "name": "Virtual Protocol",
+            "symbol": "VIRTUAL",
+            "logoUrl": "https://ipfs.io/ipfs/bafkre...",
+            "id": "68ca86b973a7083867c6d386"
+          },
+          "pct_bps": 4000,
+          "_id": "6983c090ff8f3d8a0f996270",
+          "id": "6983c090ff8f3d8a0f996270"
+        }
+      ],
+      "creator": {
+        "_id": "68e6e163bcfe1ea703b7fa28",
+        "name": "Tops",
+        "email": "agustinconforti89@gmai.com",
+        "avatar": "https://s3.blocsys.com/.../avatar.png",
+        "walletAddress": "HzgvDAeDhyWKj8D2UbHZqikMrHrZh3cyNASPKVykrUrM",
+        "twitter_username": "aconfo",
+        "useTwitterImage": false,
+        "useAvatarImage": true,
+        "socialLinks": [{}],
+        "id": "68e6e163bcfe1ea703b7fa28"
+      },
+      "category": {
+        "_id": "691ace106d9f63ddb538f633",
+        "name": "Manual"
+      },
+      "totalValueLocked": 14.808095,
+      "sharePrice": 1.3484338807683582,
+      "daoconfig": null,
+      "vaultApy": null,
+      "performance7d": 13.01
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "total": 2,
+    "totalPages": 1,
+    "hasNext": false,
+    "hasPrev": false
+  }
+}
+```
+
+**Vault item fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_id` | string | Mongo document id |
+| `vaultName` | string | Display name |
+| `vaultSymbol` | string | Symbol (e.g. `AGE-DTF`) |
+| `vaultAddress` | string | On-chain vault PDA address |
+| `description` | string | Strategy description |
+| `vaultIndex` | number | Factory-assigned vault index |
+| `tags` | string[] | Searchable tags |
+| `nav` | string | Net asset value (decimal-as-string; `"0"` until first deposit) |
+| `totalSupply` | string | Total share supply (decimal-as-string) |
+| `feeConfig.managementFeeBps` | number | Management fee in basis points |
+| `underlyingAssets[]` | array | Asset allocations — each item has `assetAllocation` (`name`, `symbol`, `logoUrl`, `_id`) and `pct_bps` |
+| `creator` | object | Creator profile — `name`, `email`, `avatar`, `walletAddress`, `twitter_username`, etc. |
+| `category` | object | `{ _id, name }` (e.g. `"Manual"`) |
+| `totalValueLocked` | number \| null | TVL in USD. Present when `includeTvl=true`. |
+| `sharePrice` | number \| null | Share price in USD. Present when `includeTvl=true`. |
+| `daoconfig` | object \| null | DAO configuration; `null` for non-DAO vaults |
+| `vaultApy` | number \| null | APY (`null` until enough history) |
+| `performance7d` | number \| null | 7-day performance % |
+
+**Pagination fields:** `page`, `limit`, `total`, `totalPages`, `hasNext`, `hasPrev`.
+
+**Note:** `nav` and `totalSupply` are returned as strings (decimal-safe representation). Parse with `Number()` or a big-number library before arithmetic. `vaultApy` and `performance7d` may be `null` for new vaults with insufficient history.
+
+**Errors:** `400` Invalid query params | `401` Invalid or missing JWT
+
+---
+
+## 12b. GET `/vaults/user` - List User Vaults [Authenticated]
+
+Returns a paginated list of vaults owned by the authenticated user (resolved from the JWT). Filterable by vault type, with optional TVL data hydration. Use this in preference to `/dtf/my-vaults` when you need pagination or `vaultType` filtering.
+
+**Query params:**
+
+```
+GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `page` | number | `1` | Page number (1-indexed) |
+| `limit` | number | `10` | Items per page |
+| `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
+| `includeTvl` | boolean | `true` | Hydrate `totalValueLocked` / `sharePrice` (set `false` for cheaper list-only calls) |
+
+**Response (200):** Same shape as `/vaults/featured/list` — `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. See the field table above for every property the agent should read.
+
+**Errors:** `400` Invalid query params | `401` Invalid or missing JWT
+
+---
+
 ## 14. POST `/policy/dry-run` - Simulate Policy Evaluation [Authenticated]
 
 Runs a proposed basket + policy against all pre-launch policy rules (asset mode, whitelist/blacklist, min liquidity, min 24h volume, asset count bounds, per-asset allocation bounds) and returns **every** violation in one pass. No DB write, no on-chain cost — use in a tight loop to iterate on basket/policy combinations before calling `/launch-dtf`.

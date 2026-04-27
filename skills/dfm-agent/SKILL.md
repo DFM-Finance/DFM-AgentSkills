@@ -781,10 +781,18 @@ const sig = await signAndSendTransaction(response.onChain.transaction, keypair, 
 ### Step 5: Manage (Ongoing, autonomous)
 
 After launch, the agent autonomously:
+- Lists the user's vaults via `GET {DFM_API_URL}/api/v2/agent/vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (paginated; switch `vaultType=yield_dtf` for yield funds)
+- Browses platform-featured vaults via `GET {DFM_API_URL}/api/v2/agent/vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true`
 - Monitors vault state via `GET {DFM_API_URL}/api/v2/agent/dtf/:symbol/state`
 - Checks rebalancing readiness via `GET {DFM_API_URL}/api/v2/agent/dtf/:symbol/rebalance/check`
 - Executes rebalances via `POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/rebalance` (admin wallet executes behind the scenes)
 - Distributes accrued fees via `POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/distribute-fees` (returns unsigned tx for agent to sign)
+
+**Listing vaults (`/vaults/user`, `/vaults/featured/list`):** both endpoints take the same four query params — `page`, `limit`, `vaultType` (`dtf` | `yield_dtf`), `includeTvl`. Use `/vaults/user` to enumerate the caller's own vaults with pagination and type filtering (preferred over the legacy unpaginated `/dtf/my-vaults`); use `/vaults/featured/list` to surface featured vaults across the platform. Set `includeTvl=true` when the UI needs `totalValueLocked` / `sharePrice`; set `false` for cheaper list-only calls. Iterate `page` until `pagination.hasNext` is `false` (or `pagination.page >= pagination.totalPages`).
+
+**Response shape (both endpoints):** `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. Each `Vault` carries `vaultName`, `vaultSymbol`, `vaultAddress`, `description`, `vaultIndex`, `tags[]`, `feeConfig.managementFeeBps`, `underlyingAssets[]` (each with nested `assetAllocation: { name, symbol, logoUrl }` and `pct_bps`), `creator` (rich profile object: `name`, `walletAddress`, `avatar`, `twitter_username`), `category: { name }`, `totalValueLocked`, `sharePrice`, `vaultApy`, `performance7d`, plus string-typed `nav` and `totalSupply`. See `references/api-reference.md` § 12a for the full field table.
+
+**When displaying vault lists to the user, surface the readable fields** — `vaultName` / `vaultSymbol`, `description`, the asset basket as a comma-separated `symbol pct%` summary (divide `pct_bps` by 100), `totalValueLocked` formatted as USD, `performance7d` as a percentage, `feeConfig.managementFeeBps / 100` as the fee %, and `creator.name` (or `creator.twitter_username`) as the author. **Skip `_id`, `id`, raw `pct_bps`, internal Mongo fields, and `daoconfig: null`.** `nav` and `totalSupply` are decimal-safe strings — parse with `Number()` before any math, and treat `"0"` / `null` `vaultApy` / `null` `performance7d` as "no data yet" for new vaults.
 
 All management operations are single API calls. No confirmation needed.
 
@@ -980,7 +988,9 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Dry-run policy** | `POST` | `/policy/dry-run` | JWT | `underlyingAssets` + `policy` |
 | Build vault tx (policy-gated) | `POST` | `/launch-dtf` | JWT | `signerPublicKey` + vault config **+ policy** |
 | Finalize DTF (metadata only) | `POST` | `/dtf-create` | JWT | `transactionSignature` + vault metadata |
-| My vaults | `GET` | `/dtf/my-vaults` | JWT | - |
+| **Featured vaults (paginated)** | `GET` | `/vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` | JWT | query params |
+| **User vaults (paginated)** | `GET` | `/vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` | JWT | query params |
+| My vaults (legacy, unpaginated) | `GET` | `/dtf/my-vaults` | JWT | - |
 | Vault state | `GET` | `/dtf/:symbol/state` | JWT | - |
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
 | Rebalance check | `GET` | `/dtf/:symbol/rebalance/check` | JWT | - |
@@ -1007,6 +1017,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Set up my DFM agent` | Asks for wallet address, creates agent profile via `/profile-launch`, saves auth token, generates keypair |
 | `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
 | `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
+| `Show me my vaults` / `List my DTFs` | `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (use `vaultType=yield_dtf` for yield funds; iterate `page` to walk pagination) |
+| `Show featured vaults` | `GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` |
 | `Show me the state of SOLBC` | `GET /dtf/SOLBC/state` -- returns APY, TVL, NAV, portfolio |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
