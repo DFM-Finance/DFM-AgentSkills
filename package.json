@@ -1,0 +1,24 @@
+{
+  "name": "dfm-agent-skills",
+  "version": "0.2.0",
+  "description": "Fully autonomous AI agent skill for DTF (DeFi Token Fund) vault management on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys on-chain — no human confirmation required.",
+  "homepage": "https://qa.dfm.finance",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DFM-Finance/DFM-AgentSkills.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "skill",
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "solana",
+    "defi",
+    "vault",
+    "rebalance",
+    "dtf",
+    "fund-management",
+    "autonomous-agent"
+  ]
+}
