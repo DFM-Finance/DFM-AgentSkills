@@ -790,6 +790,23 @@ After launch, the agent autonomously:
 
 **Listing vaults (`/vaults/user`, `/vaults/featured/list`):** both endpoints take the same four query params — `page`, `limit`, `vaultType` (`dtf` | `yield_dtf`), `includeTvl`. Use `/vaults/user` to enumerate the caller's own vaults with pagination and type filtering (preferred over the legacy unpaginated `/dtf/my-vaults`); use `/vaults/featured/list` to surface featured vaults across the platform. Set `includeTvl=true` when the UI needs `totalValueLocked` / `sharePrice`; set `false` for cheaper list-only calls. Iterate `page` until `pagination.hasNext` is `false` (or `pagination.page >= pagination.totalPages`).
 
+**Mapping natural-language requests to `page`:** translate the user's phrasing literally into the `page` query param.
+
+| User says | Send |
+|---|---|
+| "show me my vaults" / "list my DTFs" | `?page=1&limit=10&...` (always start at page 1) |
+| "show me the **second page**" / "page 2" | `?page=2&limit=10&...` |
+| "page 5 of featured vaults" | `?page=5&limit=10&...` (against `/vaults/featured/list`) |
+| "**next page**" / "show me more" | `?page=<lastShown + 1>&...`. Refuse and tell the user "you're on the last page" if the previous response had `pagination.hasNext === false`. |
+| "**previous page**" / "go back" | `?page=<lastShown - 1>&...`. If `lastShown` was already 1, return the same page-1 results (don't let `page` go below 1). |
+| "first page" / "go back to the start" | `?page=1&...` |
+| "last page" | First call `page=1` to read `pagination.totalPages`, then call `?page=<totalPages>&...` |
+| "show me 25 per page" / "fetch 50 at a time" | Forward `limit` as given (clamp to a sensible max like 100 if abused). Reset `page` to 1 when `limit` changes. |
+
+**Remembering pagination state across turns:** the skill is stateless — there's no built-in "current page" memory. Track the last `pagination.page` and `pagination.totalPages` you returned **in your own conversation context** so that "next page" / "previous page" requests resolve correctly. If the user switches filters (`vaultType`, `search`, `limit`), reset to `page=1` because the result set has changed and the old page index no longer maps to the same data.
+
+**After fetching a page**, surface the navigation footer to the user: e.g. "Page 2 of 5 — say 'next page' for more, or 'page N' to jump." Use `pagination.hasNext` / `pagination.hasPrev` to decide which controls to mention. Never hide pagination from the user — if `pagination.totalPages > 1` they need to know more pages exist.
+
 **Response shape (both endpoints):** `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. Each `Vault` carries `vaultName`, `vaultSymbol`, `vaultAddress`, `description`, `vaultIndex`, `tags[]`, `feeConfig.managementFeeBps`, `underlyingAssets[]` (each with nested `assetAllocation: { name, symbol, logoUrl }` and `pct_bps`), `creator` (rich profile object: `name`, `walletAddress`, `avatar`, `twitter_username`), `category: { name }`, `totalValueLocked`, `sharePrice`, `vaultApy`, `performance7d`, plus string-typed `nav` and `totalSupply`. See `references/api-reference.md` § 12a for the full field table.
 
 **When displaying vault lists to the user, surface the readable fields** — `vaultName` / `vaultSymbol`, `description`, the asset basket as a comma-separated `symbol pct%` summary (divide `pct_bps` by 100), `totalValueLocked` formatted as USD, `performance7d` as a percentage, `feeConfig.managementFeeBps / 100` as the fee %, and `creator.name` (or `creator.twitter_username`) as the author. **Skip `_id`, `id`, raw `pct_bps`, internal Mongo fields, and `daoconfig: null`.** `nav` and `totalSupply` are decimal-safe strings — parse with `Number()` before any math, and treat `"0"` / `null` `vaultApy` / `null` `performance7d` as "no data yet" for new vaults.
@@ -1017,8 +1034,12 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Set up my DFM agent` | Asks for wallet address, creates agent profile via `/profile-launch`, saves auth token, generates keypair |
 | `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
 | `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
-| `Show me my vaults` / `List my DTFs` | `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (use `vaultType=yield_dtf` for yield funds; iterate `page` to walk pagination) |
+| `Show me my vaults` / `List my DTFs` | `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (always start at page 1; switch `vaultType=yield_dtf` for yield funds) |
+| `Show me the second page` / `Page 2` (after a `vaults/user` listing) | `GET /vaults/user?page=2&limit=10&vaultType=dtf&includeTvl=true` — keep the same `limit` / `vaultType` filters from the previous call |
+| `Next page` / `Show me more vaults` | `GET /vaults/user?page=<lastShown+1>&limit=...` — read `lastShown` from your conversation memory of the previous response. Stop and tell the user "you're on the last page" if `pagination.hasNext` was `false`. |
+| `Previous page` / `Go back` | `GET /vaults/user?page=<lastShown-1>&limit=...` — clamp at `page=1`. |
 | `Show featured vaults` | `GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` |
+| `Page 3 of featured vaults` | `GET /vaults/featured/list?page=3&limit=10&vaultType=dtf&includeTvl=true` |
 | `Show me the state of SOLBC` | `GET /dtf/SOLBC/state` -- returns APY, TVL, NAV, portfolio |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
