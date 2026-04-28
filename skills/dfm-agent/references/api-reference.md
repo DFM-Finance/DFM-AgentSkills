@@ -534,7 +534,7 @@ Runs a non-blocking policy evaluation and creates/refreshes the rebalancing sugg
 
 ## 7. POST `/dtf/:symbol/rebalance` - Execute Rebalancing [Authenticated]
 
-Triggers vault rebalancing. **Policy is non-blocking** — any rule violations are persisted as `policyReviewFlags` on the latest `RebalancingSuggestion` and surfaced under `policyCheck` in the response, but rebalancing still proceeds. The caller provides their public key for identification; rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
+Triggers vault rebalancing. **Ownership-gated** — `signerPublicKey` must match the vault's `creatorAddress`; otherwise the request fails with `403 Forbidden` ("Only the vault creator can perform this action") *before* any rebalance work runs. The agent must NOT retry on 403 or try alternate vault lookups — surface to the user and stop. **Policy is non-blocking** — any rule violations are persisted as `policyReviewFlags` on the latest `RebalancingSuggestion` and surfaced under `policyCheck` in the response, but rebalancing still proceeds. Rebalancing is executed server-side by the admin wallet. Runs sell phase then buy phase on-chain.
 
 **Path params:** `symbol` - Vault symbol
 
