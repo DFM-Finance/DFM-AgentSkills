@@ -7,7 +7,7 @@ description: |
   no human confirmation required. The policy engine is the guardrail, not a human approval step.
   Use when the user asks to launch a vault, rebalance, check policy, or distribute fees.
 homepage: https://qa.dfm.finance
-license: Proprietary
+license: MIT
 compatibility: Claude Code, Codex, OpenClaw
 metadata: {"category":"defi-agent","auth":"jwt+keypair","author":"dfm","tags":"solana,defi,vault,rebalance,dtf,fund-management,autonomous-agent"}
 ---
