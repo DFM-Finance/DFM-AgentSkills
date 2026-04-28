@@ -134,4 +134,4 @@ The agent is the creator. It has full authority over what it launches. No human-
 
 ## License
 
-Proprietary. Copyright DFM.
+[MIT](./LICENSE) © DFM Finance
