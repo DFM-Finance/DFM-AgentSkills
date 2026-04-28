@@ -1103,7 +1103,7 @@ When `policyCheck.flagged` is `true`:
 - **Use real token data.** Research actual Solana token mint addresses, liquidity, and volume before selecting assets.
 - **Resolve mint addresses automatically.** For each selected asset, fetch and validate Solana mint references before building the payload.
 - **Set sensible policies.** Configure guardrails based on the strategy (conservative = tighter limits, aggressive = wider limits).
-- **Handle errors and retry.** If an API call fails, read the error, fix the payload, and retry.
+- **Handle errors selectively.** Retry only when the error is *fixable by changing the payload* (validation errors, policy violations with `violations[]`, transient network blips). For permission errors (`403`), wrong-resource errors (`404 vault not found`), or auth errors (`401`), do NOT retry — show a single friendly sentence to the user and end the turn. See the failure-message template in the DON'T list.
 - **Use empty launch media fields.** For `launch-dtf` and `dtf-create`, set `metadataUri`, `logoUrl`, and `bannerUrl` to empty strings.
 - **Enforce USDC exclusion.** Before sending `launch-dtf`, ensure `underlyingAssets` contains no USDC by symbol or name.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
@@ -1112,6 +1112,20 @@ When `policyCheck.flagged` is `true`:
 ### DON'T:
 - **NEVER retry on HTTP `403` / `Forbidden`.** A 403 from any agent endpoint (`/rebalance`, `/distribute-fees`, `/vaults/:id/update-assets-tx`, `/vaults/:id/underlying-assets-by-mint`) means the caller's `signerPublicKey` does not match the vault's `creatorAddress` — only the vault creator can mutate the vault. **STOP IMMEDIATELY.** Do NOT retry the same call, do NOT try a different `vaultSymbol` / `vaultId` / index, do NOT search `/vaults/user` or `/vaults/featured/list` for alternate matches, do NOT call `/dtf/:symbol/state` to "verify". Surface a one-line message to the user — e.g. *"That vault belongs to a different wallet. Only the creator can perform this action."* — and end the turn. A 403 is a permission verdict, not a transient error.
 - **NEVER expose technical details to the user.** Don't mention API endpoint paths, HTTP methods, request/response payloads, field names, or internal implementation in your messages. The user should only see friendly status updates (e.g. "Creating your profile now..." NOT "I'll call POST /profile-launch with your wallet address").
+- **NEVER write failure reports that read like a debug log.** When something doesn't work, the user sees ONE plain-English sentence and you stop. The following are all banned in user-facing output:
+  - HTTP status codes or status names: ❌ `404`, `403`, `Not Found`, `Forbidden`
+  - Endpoint paths or methods: ❌ `POST /api/v2/agent/dtf/POP-DTF/rebalance`, `GET /vaults/user`
+  - Raw request/response bodies, JSON snippets, error messages copied from the server: ❌ `"Vault with symbol \"POP-DTF\" not found"`
+  - Internal identifiers: ❌ vault `_id`, `vaultIndex`, signer public keys, transaction signatures (only emit signatures on a confirmed success summary)
+  - Section headers like `Request`, `Response`, `Result`, `Extra check`, `What you can do next` — those belong in a debug log, not chat
+  - Suggestions to change configuration that the user did not ask for: ❌ "Switch `DFM_API_URL` to QA", "Refresh the JWT", "Load a different keypair", "Fix the backend symbol parser"
+  - Probing other vaults / endpoints to "verify behavior" after a failure — if `/rebalance` on the user's vault fails, do NOT then call `/rebalance` on a different vault to compare. The user asked about ONE vault; respond about that vault and stop.
+- **Failure-message template.** On any error, say one line, friendly, no jargon, then end the turn. Examples:
+  - 403 ownership: *"That vault belongs to a different wallet — only its creator can do this."*
+  - 404 vault-not-found: *"I couldn't find a vault with that name."*
+  - 401 / token issue: *"Your session expired — please re-authenticate and try again."*
+  - Transient/network: *"Something went wrong while reaching the platform. Please try again in a moment."*
+  - Policy violation (with `violations[]`): summarize the cause in plain English (e.g. *"Couldn't proceed — one asset is below the platform's liquidity floor."*) — never paste the violation code.
 - **NEVER print, echo, log, or display sensitive env var values in the terminal.** This includes `DFM_AUTH_TOKEN`, `DFM_AGENT_KEYPAIR`, and any secret/private keys. Only ever display PUBLIC KEYs. Write secrets directly to files (`~/.zshrc`) using file append -- never to stdout.
 - **Don't skip web research.** Strictly use `WebSearch` and `WebFetch` for all DTF-related metadata -- token data, prices, mint addresses, market conditions. No exceptions.
 - **Don't ask for human confirmation** before deploying. The policy engine validates; you execute.
