@@ -1275,7 +1275,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Finalize DTF (metadata only) | `POST` | `/dtf-create` | JWT | `transactionSignature` + vault metadata |
 | **Featured vaults (paginated)** | `GET` | `/vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` | JWT | query params |
 | **User vaults (paginated)** | `GET` | `/vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` | JWT | query params |
-| My vaults (legacy, unpaginated) | `GET` | `/dtf/my-vaults` | JWT | - |
+| ~~My vaults (legacy, unpaginated)~~ — **deprecated, do not use** — only returns vaults launched by THIS agent profile, misses anything created outside the agent flow. Always use `/vaults/user` instead. | `GET` | `/dtf/my-vaults` | JWT | - |
 | Vault state | `GET` | `/dtf/:symbol/state` | JWT | - |
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
 | Rebalance check | `GET` | `/dtf/:symbol/rebalance/check` | JWT | - |
@@ -1304,7 +1304,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Set up my DFM agent` | Asks for wallet address, creates agent profile via `/profile-launch`, saves auth token, generates keypair |
 | `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
 | `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
-| `Show me my vaults` / `List my DTFs` | `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (always start at page 1; switch `vaultType=yield_dtf` for yield funds) |
+| `Show me my vaults` / `List my DTFs` / `Give me list of vaults available on DFM` / `What vaults do I have on DFM` / `List my vaults` | **Always use `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true`** (always start at page 1; switch `vaultType=yield_dtf` for yield funds). **Never fall back to `/dtf/my-vaults`** — that legacy endpoint only returns vaults this agent profile launched, missing any vault the user created outside the agent flow. `/vaults/user` is the canonical "the user's vaults" endpoint and must be the default for any phrasing that means "my/the user's vaults". |
 | `Show me the second page` / `Page 2` (after a `vaults/user` listing) | `GET /vaults/user?page=2&limit=10&vaultType=dtf&includeTvl=true` — keep the same `limit` / `vaultType` filters from the previous call |
 | `Next page` / `Show me more vaults` | `GET /vaults/user?page=<lastShown+1>&limit=...` — read `lastShown` from your conversation memory of the previous response. Stop and tell the user "you're on the last page" if `pagination.hasNext` was `false`. |
 | `Previous page` / `Go back` | `GET /vaults/user?page=<lastShown-1>&limit=...` — clamp at `page=1`. |

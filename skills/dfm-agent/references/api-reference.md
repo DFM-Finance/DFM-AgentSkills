@@ -328,7 +328,9 @@ The returned `policyId` is the policy committed during `/launch-dtf`, now linked
 
 ---
 
-## 4. GET `/dtf/my-vaults` - List My Vaults [Authenticated]
+## 4. GET `/dtf/my-vaults` - List My Vaults [Authenticated, **DEPRECATED**]
+
+> **Do not call this from the agent.** Use **§ 12b `GET /vaults/user`** instead. This legacy endpoint only returns vaults launched by THIS agent profile (filters on `agentCreated=true`), so it misses any vault the user created outside the agent flow (web dashboard, another agent, etc.). For every "list my vaults" / "vaults on DFM" / "what do I own" phrasing, route to `/vaults/user`.
 
 Returns all DTF vaults created by the authenticated agent's wallet. No request body — wallet is extracted from the JWT token.
 
