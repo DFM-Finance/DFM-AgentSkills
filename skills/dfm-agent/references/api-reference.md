@@ -88,7 +88,11 @@ Creates an agent profile by looking up the user via wallet public key. Requires 
 }
 ```
 
-**Errors:** `400` Validation error | `404` No profile found for wallet | `409` Username taken or agent already exists
+**Errors:**
+- `400` Validation error (missing required field, or `username` violates `/^[a-zA-Z0-9_]+$/`)
+- `404` No profile found for the given `userPublicKey`
+- `409` `"Username is already taken"` — `profile-launch.js` auto-retries with a random suffix (matched via `UNAME_RX = /username/i`)
+- `409` `"An agent profile already exists for this wallet address"` — script does NOT retry; agent should call `/token/refresh-by-wallet` instead
 
 ---
 
