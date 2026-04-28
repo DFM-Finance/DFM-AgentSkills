@@ -813,6 +813,180 @@ After launch, the agent autonomously:
 
 All management operations are single API calls. No confirmation needed.
 
+### Step 6: Update Underlying Assets (Autonomous Three-Phase Flow)
+
+When the user says **"update underlying"**, **"change the basket"**, **"swap assets"**, **"rebalance to X"**, or any phrasing that means "replace the vault's `underlyingAssets` allocations", run this fully-autonomous three-phase flow. **Do not ask for confirmation between phases.**
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  UPDATE UNDERLYING — autonomous three-phase flow                          │
+│                                                                          │
+│  Phase 1: DECIDE THE NEW BASKET                                          │
+│    - WebSearch / WebFetch + GET /market-metrics → candidate assets       │
+│    - Match against the vault's existing constitutional policy            │
+│      (GET /dtf/:symbol/policy → asset_mode, whitelist, min liquidity)    │
+│    - Choose `mintBps` allocations summing to 10000                       │
+│    - Prefer `symbol` / `name` identifiers — backend resolves to mints    │
+│                                                                          │
+│  Phase 2: BUILD ON-CHAIN TX (POLICY-GATED, SERVER-SIDE)                  │
+│    POST /api/v2/agent/vaults/:id/update-assets-tx                        │
+│      { signerPublicKey, underlyingAssets: [{ symbol, mintBps }, ...] }   │
+│                                                                          │
+│      ├─ 400 + violations[] ─▶ Phase 1 with adjustments (loop)            │
+│      └─ 201 + base64 tx     ─▶ Phase 3                                   │
+│                                                                          │
+│    Sign locally with DFM_AGENT_KEYPAIR → submit on-chain → confirm       │
+│                                                                          │
+│  Phase 3: SYNC DB                                                        │
+│    PATCH /api/v2/agent/vaults/:id/underlying-assets-by-mint              │
+│      { underlyingAssets: [{ mintAddress, pct_bps }, ...] }               │
+│      (Note: pct_bps, NOT mintBps — different field name)                 │
+│      Auto-flushes agent:vaults:* caches.                                 │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Phase 1 — Decide the new basket
+
+Identify which assets to add/remove/rebalance based on the user's intent. Use the same research tools as launch:
+
+- `WebSearch` / `WebFetch` for token discovery (price action, narratives, market caps).
+- `GET /market-metrics?symbols=A,B,C` for the **authoritative** Jupiter liquidity / 24h volume — same numbers the policy engine enforces against Rules 2 / 3.
+- `GET /dtf/:symbol/policy` to read the vault's existing `asset_mode`, `asset_whitelist`, `asset_blacklist`, `min_amm_liquidity_usd`, `min_24h_volume_usd`, `max_asset_pct`, `min_asset_pct`, `min_stablecoin_pct`. Calibrate the new basket so the policy gate in Phase 2 doesn't reject it. **The policy is fixed; only the basket is editable in this flow.**
+
+Pick `mintBps` for each asset such that all values sum to **exactly 10000**. Round half-away-from-zero if needed and absorb the remainder into the largest allocation.
+
+**You can pass `symbol` or `name` instead of `mintAddress`** — the backend resolves them via the `asset-allocation` collection (same path as `/launch-dtf`). Resolving server-side is cheaper and avoids the agent maintaining its own mint-address map.
+
+#### Phase 2 — Build the on-chain tx (policy-gated)
+
+```bash
+# Inline node script — never echo the JWT or the keypair to terminal
+node -e '
+const http = require("http");
+const https = require("https");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/update-assets-tx");
+const client = url.protocol === "https:" ? https : http;
+
+const { Keypair, VersionedTransaction, Connection } = require("@solana/web3.js");
+const bs58 = require("bs58").default || require("bs58");
+const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
+
+const payload = JSON.stringify({
+  signerPublicKey: keypair.publicKey.toBase58(),
+  underlyingAssets: [
+    { symbol: "SOL", mintBps: 5000 },
+    { symbol: "JUP", mintBps: 3000 },
+    { name: "Bonk", mintBps: 2000 }
+  ]
+});
+
+const req = client.request(url, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+    "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN
+  }
+}, (res) => {
+  let data = ""; res.on("data", (c) => data += c);
+  res.on("end", async () => {
+    const json = JSON.parse(data);
+    if (res.statusCode === 201) {
+      // Sign locally + submit on-chain
+      const conn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
+      const tx = VersionedTransaction.deserialize(Buffer.from(json.transaction, "base64"));
+      tx.sign([keypair]);
+      const sig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
+      await conn.confirmTransaction(sig, "confirmed");
+      console.log("ON_CHAIN_OK signature=" + sig + " vaultIndex=" + json.vaultIndex);
+    } else if (res.statusCode === 400 && json.ok === false) {
+      // Policy violation — every violated rule in violations[]
+      console.log("POLICY_VIOLATION");
+      for (const v of json.violations || []) {
+        console.log("  " + v.violationCode + ": " + v.message);
+      }
+    } else {
+      console.log("ERROR " + res.statusCode + ": " + data);
+    }
+  });
+});
+req.on("error", (e) => console.log("ERROR: " + e.message));
+req.write(payload);
+req.end();
+' <vaultId>
+```
+
+Run with `timeout: 600000` (10 minutes) — on-chain confirmation can take time.
+
+**On policy violation (HTTP 400 + `{ ok: false, violations[] }`):** read every entry in `violations[]`, summarise the codes to the user as a one-line "blocked because", then **automatically retry** Phase 1 with adjustments:
+
+| Violation code | What to change |
+|---|---|
+| `rule2MinAmmLiquidity` / `rule3Min24hVolume` | Drop the offending asset OR swap it for a more-liquid alternative — the vault's policy threshold is fixed, so the basket must adapt. |
+| `rule5MaxPctPerAsset` | Reduce that asset's `mintBps` and redistribute to others. |
+| `rule6MinPctPerAssetIfHeld` | Either raise the asset above the floor OR drop it from the basket entirely. |
+| `rule7MinStablecoinFloor` | Add a stablecoin allocation (must be one already in `asset-allocation` and permitted by `asset_mode`). |
+| `rule1WhitelistBlacklist` / `assetModeViolation` | Remove the asset (it's blacklisted or not whitelisted in the vault's existing policy). |
+
+Loop Phase 1 → Phase 2 up to 3 times. If still failing after 3 attempts, surface the unresolved violations to the user with the suggestion to either change the vault's policy out-of-band or pick a different basket strategy.
+
+**Signing:** use the existing `signAndSend` helper from the Pre-Flight Auth section. The signed tx hits Solana RPC; wait for `confirmed` commitment before moving to Phase 3.
+
+#### Phase 3 — Sync DB
+
+After the on-chain tx confirms, `PATCH /api/v2/agent/vaults/:id/underlying-assets-by-mint` to update the DB record. **Note the field-name difference:**
+
+- Phase 2 (`/update-assets-tx`) uses `mintBps` (matches the on-chain instruction).
+- Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches the DB schema).
+
+Same numeric values, different keys. Always include `mintAddress` here (no symbol/name resolution at this endpoint).
+
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/underlying-assets-by-mint");
+const client = url.protocol === "https:" ? https : http;
+
+const payload = JSON.stringify({
+  underlyingAssets: [
+    { mintAddress: "So11111111111111111111111111111111111111112", pct_bps: 5000 },
+    { mintAddress: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", pct_bps: 3000 },
+    { mintAddress: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", pct_bps: 2000 }
+  ]
+});
+
+const req = client.request(url, {
+  method: "PATCH",
+  headers: {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+    "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN
+  }
+}, (res) => {
+  let data = ""; res.on("data", (c) => data += c);
+  res.on("end", () => console.log("DB_SYNC " + res.statusCode));
+});
+req.on("error", (e) => console.log("ERROR: " + e.message));
+req.write(payload);
+req.end();
+' <vaultId>
+```
+
+**Why both phases?** Phase 2 mutates on-chain state; Phase 3 makes the change visible to read endpoints (`/vaults/user`, `/vaults/featured/list`) immediately. The chain-event pipeline does eventually backfill the DB on its own, but PATCH gives synchronous visibility — the user expects "show me my vault" to reflect the new basket immediately after they say "update underlying".
+
+#### After both phases succeed
+
+Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset1 pct1%, asset2 pct2%, ...>`. On-chain signature: `<sig>`." The agent should NEVER expose endpoint names, payload shapes, or HTTP methods in user-facing messages — only the outcome.
+
+#### CRITICAL ERROR HANDLING for update underlying
+
+1. **`/update-assets-tx` returns 400 with `violations[]`** (before any signing): policy gate failed — nothing on-chain. Loop Phase 1 with adjustments. Free.
+2. **`/update-assets-tx` returns 400 with asset-not-found message** ("The following assets are not available in the platform: ..."): the symbol/name didn't resolve. Pick a different asset whose symbol IS in `asset-allocation` (you can verify against `/market-metrics`).
+3. **Signing/submission fails on-chain**: you MAY retry `/update-assets-tx` to get a fresh blockhash + fresh policy check (policy may have drifted in the meantime). Same `signerPublicKey` and same basket — no other changes needed.
+4. **On-chain submitted but Phase 3 (PATCH) fails**: do NOT re-run `/update-assets-tx` (the on-chain change already happened — don't double-update). Retry the PATCH with the **same body**. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB on its own.
+5. **`/update-assets-tx` returns 404 "No constitutional policy found"**: the vault was created outside the agent flow (no `/launch-dtf`). Update is blocked. Surface this to the user — there's nothing to fix from the agent side.
+
 ### Policy Violation Handling
 
 Both `/rebalance/check` and `/rebalance` run a **full policy evaluation** against all 11 constitutional policy rules. **Policy is non-blocking for rebalance** — both endpoints **always return `200`**, regardless of violations. Rule violations appear in the response under `policyCheck`:
@@ -1012,6 +1186,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
 | Rebalance check | `GET` | `/dtf/:symbol/rebalance/check` | JWT | - |
 | Rebalance | `POST` | `/dtf/:symbol/rebalance` | JWT | `signerPublicKey` |
+| **Build update-assets tx (policy-gated)** | `POST` | `/vaults/:id/update-assets-tx` | JWT | `signerPublicKey` + `underlyingAssets` (`mintAddress`/`symbol`/`name` + `mintBps`) |
+| **Sync updated basket to DB** | `PATCH` | `/vaults/:id/underlying-assets-by-mint` | JWT | `underlyingAssets` (`mintAddress` + `pct_bps`) |
 | Build distribute fees tx | `POST` | `/dtf/:symbol/distribute-fees` | JWT | `signerPublicKey` |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
 | Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
@@ -1041,6 +1217,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Show featured vaults` | `GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` |
 | `Page 3 of featured vaults` | `GET /vaults/featured/list?page=3&limit=10&vaultType=dtf&includeTvl=true` |
 | `Show me the state of SOLBC` | `GET /dtf/SOLBC/state` -- returns APY, TVL, NAV, portfolio |
+| `Update underlying for SOLBC` / `Change SOLBC basket to A,B,C` / `Swap out X for Y in SOLBC` | Three-phase autonomous flow: (1) decide new basket against `/market-metrics` + `/dtf/:symbol/policy`; (2) `POST /vaults/:id/update-assets-tx` (policy-gated — server returns 400 + `violations[]` if basket breaches policy, otherwise unsigned tx); on success, sign locally with `DFM_AGENT_KEYPAIR` and submit on-chain; (3) `PATCH /vaults/:id/underlying-assets-by-mint` to sync DB. See "Step 6: Update Underlying Assets" for the full flow + retry rules. |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
 | `Generate a Solana keypair for my DFM Agent wallet` | Creates keypair, saves to file, writes env var, reports public key only |
@@ -1059,6 +1236,11 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Policy `flagged: true` on rebalance** | Rebalance is non-blocking — the operation already proceeded. Inspect `policyCheck.reviewFlags` to see which rules were violated and surface them to the user as a warning. Same flags are persisted on the latest `RebalancingSuggestion.policyReviewFlags`. |
 | **Token revoked unexpectedly** | Tokens are only invalidated by an explicit `POST /token/revoke` call. Refresh issues a new token without touching existing ones — multiple active tokens per agent are supported. |
 | **409 Conflict on launch-dtf** | A policy (or vault) already exists for this name/symbol. Use a unique pair. Note: the 409 now fires at `/launch-dtf` (policy commit), not `/dtf-create`. |
+| **`/update-assets-tx` returns 400 + `violations[]`** | Policy gate failed — nothing on-chain. Read every entry in `violations[]`, adjust the basket per the table in "Step 6: Update Underlying Assets", and retry. Free — no signing, no on-chain cost. Loop up to 3 times before surfacing to the user. |
+| **`/update-assets-tx` returns 400 "asset not available"** | A `symbol` or `name` you passed isn't in `asset-allocation`. Either pass the `mintAddress` directly OR pick a different asset whose symbol the platform knows about (verify against `/market-metrics`). |
+| **`/update-assets-tx` returns 404 "No constitutional policy found"** | Vault was not launched via `/launch-dtf`, so it has no policy to validate against. Updates are blocked at the agent layer for safety. Surface to the user — there's nothing the agent can fix here. |
+| **On-chain update succeeded but `PATCH /underlying-assets-by-mint` failed** | Do NOT re-run `/update-assets-tx` (the on-chain change already happened — re-running would double-update and likely fail re-validation). Retry the PATCH with the same body. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB. |
+| **Field-name confusion: `mintBps` vs `pct_bps`** | Phase 2 (`/update-assets-tx`) uses `mintBps` (matches on-chain instruction). Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches DB schema). Same numeric values, different keys — don't copy-paste between payloads without renaming. |
 
 ## Security
 
