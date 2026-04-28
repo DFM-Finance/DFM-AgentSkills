@@ -785,6 +785,255 @@ At least one identifier must be provided. Identifiers that fail to resolve are r
 
 ---
 
+## 12a. GET `/vaults/featured/list` - List Featured Vaults [Authenticated]
+
+Returns a paginated list of featured vaults across the platform. Filterable by vault type, with optional TVL data hydration.
+
+**Query params:**
+
+```
+GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `page` | number | `1` | Page number (1-indexed) |
+| `limit` | number | `10` | Items per page |
+| `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
+| `includeTvl` | boolean | `true` | Hydrate response with `totalValueLocked`, `nav`, `sharePrice` |
+
+**Response (200):**
+```json
+{
+  "data": [
+    {
+      "_id": "6983c090ff8f3d8a0f99626f",
+      "vaultName": "Agentonomy",
+      "vaultSymbol": "AGE-DTF",
+      "vaultAddress": "FdxUo6tGcpAAaDcB9771X4dywjFVJG8o972xSKoKtp8B",
+      "description": "AI agent tokens basket designed for narrative exposure...",
+      "vaultIndex": 53,
+      "tags": ["AI-agents", "agent-economy", "high-beta"],
+      "nav": "0",
+      "totalSupply": "0",
+      "feeConfig": { "managementFeeBps": 150 },
+      "underlyingAssets": [
+        {
+          "assetAllocation": {
+            "_id": "68ca86b973a7083867c6d386",
+            "name": "Virtual Protocol",
+            "symbol": "VIRTUAL",
+            "logoUrl": "https://ipfs.io/ipfs/bafkre...",
+            "id": "68ca86b973a7083867c6d386"
+          },
+          "pct_bps": 4000,
+          "_id": "6983c090ff8f3d8a0f996270",
+          "id": "6983c090ff8f3d8a0f996270"
+        }
+      ],
+      "creator": {
+        "_id": "68e6e163bcfe1ea703b7fa28",
+        "name": "Tops",
+        "email": "agustinconforti89@gmai.com",
+        "avatar": "https://s3.blocsys.com/.../avatar.png",
+        "walletAddress": "HzgvDAeDhyWKj8D2UbHZqikMrHrZh3cyNASPKVykrUrM",
+        "twitter_username": "aconfo",
+        "useTwitterImage": false,
+        "useAvatarImage": true,
+        "socialLinks": [{}],
+        "id": "68e6e163bcfe1ea703b7fa28"
+      },
+      "category": {
+        "_id": "691ace106d9f63ddb538f633",
+        "name": "Manual"
+      },
+      "totalValueLocked": 14.808095,
+      "sharePrice": 1.3484338807683582,
+      "daoconfig": null,
+      "vaultApy": null,
+      "performance7d": 13.01
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "total": 2,
+    "totalPages": 1,
+    "hasNext": false,
+    "hasPrev": false
+  }
+}
+```
+
+**Vault item fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `_id` | string | Mongo document id |
+| `vaultName` | string | Display name |
+| `vaultSymbol` | string | Symbol (e.g. `AGE-DTF`) |
+| `vaultAddress` | string | On-chain vault PDA address |
+| `description` | string | Strategy description |
+| `vaultIndex` | number | Factory-assigned vault index |
+| `tags` | string[] | Searchable tags |
+| `nav` | string | Net asset value (decimal-as-string; `"0"` until first deposit) |
+| `totalSupply` | string | Total share supply (decimal-as-string) |
+| `feeConfig.managementFeeBps` | number | Management fee in basis points |
+| `underlyingAssets[]` | array | Asset allocations — each item has `assetAllocation` (`name`, `symbol`, `logoUrl`, `_id`) and `pct_bps` |
+| `creator` | object | Creator profile — `name`, `email`, `avatar`, `walletAddress`, `twitter_username`, etc. |
+| `category` | object | `{ _id, name }` (e.g. `"Manual"`) |
+| `totalValueLocked` | number \| null | TVL in USD. Present when `includeTvl=true`. |
+| `sharePrice` | number \| null | Share price in USD. Present when `includeTvl=true`. |
+| `daoconfig` | object \| null | DAO configuration; `null` for non-DAO vaults |
+| `vaultApy` | number \| null | APY (`null` until enough history) |
+| `performance7d` | number \| null | 7-day performance % |
+
+**Pagination fields:** `page`, `limit`, `total`, `totalPages`, `hasNext`, `hasPrev`.
+
+**Note:** `nav` and `totalSupply` are returned as strings (decimal-safe representation). Parse with `Number()` or a big-number library before arithmetic. `vaultApy` and `performance7d` may be `null` for new vaults with insufficient history.
+
+**Errors:** `400` Invalid query params | `401` Invalid or missing JWT
+
+---
+
+## 12b. GET `/vaults/user` - List User Vaults [Authenticated]
+
+Returns a paginated list of vaults owned by the authenticated user (resolved from the JWT). Filterable by vault type, with optional TVL data hydration. Use this in preference to `/dtf/my-vaults` when you need pagination or `vaultType` filtering.
+
+**Query params:**
+
+```
+GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true
+Authorization: Bearer <DFM_AUTH_TOKEN>
+```
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `page` | number | `1` | Page number (1-indexed) |
+| `limit` | number | `10` | Items per page |
+| `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
+| `includeTvl` | boolean | `true` | Hydrate `totalValueLocked` / `sharePrice` (set `false` for cheaper list-only calls) |
+
+**Response (200):** Same shape as `/vaults/featured/list` — `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. See the field table above for every property the agent should read.
+
+**Errors:** `400` Invalid query params | `401` Invalid or missing JWT
+
+---
+
+## 12c. POST `/vaults/:id/update-assets-tx` - Build Update-Assets Transaction (Policy-Gated, On-Chain) [Authenticated]
+
+**Two-step gated build, server-side:**
+
+1. **Policy validation (always first).** Backend runs the vault's constitutional-policy `UPDATE_UNDERLYING` check against the proposed basket — same evaluator as `POST /policy/:vaultId/check`. If any rule violates, returns `400` with `{ ok: false, violationCode, message, violations[] }` and **NO transaction is built**. Fix the basket and retry.
+2. **Transaction build (only on a clean policy pass).** Builds an unsigned `updateUnderlyingAssets(vaultIndex, underlyingAssets)` Solana `VersionedTransaction` for client-side signing. The agent signs locally with `DFM_AGENT_KEYPAIR` and submits on-chain.
+
+The endpoint resolves each identifier (`mintAddress` / `symbol` / `name`) against the asset-allocation collection — agents can pass `{ symbol: "SOL", mintBps: 5000 }` instead of looking up mint addresses themselves.
+
+**Path Params:**
+
+| Param | Description |
+|-------|-------------|
+| `id` | Vault ID (Mongo `_id`) — get from `/vaults/user` (`data[]._id`) or `/vaults/featured/list` |
+
+**Request Body:**
+```json
+{
+  "signerPublicKey": "<public key derived from DFM_AGENT_KEYPAIR>",
+  "underlyingAssets": [
+    { "symbol": "SOL", "mintBps": 5000 },
+    { "name": "USD Coin", "mintBps": 3000 },
+    { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "mintBps": 2000 }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `signerPublicKey` | string | Yes | Base58 public key of the vault admin / fee payer (derived from `DFM_AGENT_KEYPAIR`). Must match the vault's on-chain `admin` or the program rejects the tx. |
+| `underlyingAssets[].mintAddress` | string | One-of | Solana mint address (direct, no DB lookup) |
+| `underlyingAssets[].symbol` | string | One-of | Asset symbol (e.g. `SOL`, `JUP`). Resolved against asset-allocation. |
+| `underlyingAssets[].name` | string | One-of | Asset name (e.g. `"Wrapped SOL"`). Resolved against asset-allocation. |
+| `underlyingAssets[].mintBps` | number (0-10000) | Yes | Allocation in basis points. All entries must sum to **10000**. |
+
+**Response (201) - Clean policy pass:**
+```json
+{
+  "transaction": "base64-encoded-unsigned-versioned-transaction...",
+  "vaultIndex": 42,
+  "vaultPda": "7Xk...def"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `transaction` | Base64-encoded unsigned `VersionedTransaction` — sign locally and submit on-chain |
+| `vaultIndex` | The vault's on-chain index (sanity-check) |
+| `vaultPda` | The derived vault PDA address |
+
+**Response (400) - Policy violation (no transaction built):**
+```json
+{
+  "statusCode": 400,
+  "ok": false,
+  "violationCode": "rule5MaxPctPerAsset",
+  "message": "Mint JUP... proposed at 60%; policy max is 30%.",
+  "violations": [
+    {
+      "violationCode": "rule5MaxPctPerAsset",
+      "message": "Mint JUP... proposed at 60%; policy max is 30%.",
+      "details": { "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" }
+    },
+    {
+      "violationCode": "rule7MinStablecoinFloor",
+      "message": "Proposed stablecoin share is 0%; policy requires at least 10%.",
+      "details": null
+    }
+  ]
+}
+```
+
+The `violations[]` array carries every violated rule in one pass — fix all of them before retrying. Same violation codes as Section 6 (`/dtf/:vaultSymbol/rebalance/check`).
+
+**After a successful response:** sign the transaction with `DFM_AGENT_KEYPAIR` and submit on-chain. Use the existing `signAndSend` helper from the Authentication section. After on-chain confirmation, call `PATCH /vaults/:id/underlying-assets-by-mint` (Section 12d) to sync the DB record.
+
+**Errors:** `400` policy violation, validation error, asset not found in asset-allocation, mintBps don't sum to 10000 | `401` Invalid or missing JWT | `404` Vault not found | `404` No constitutional policy found for this vault (vault was not launched via `/launch-dtf`)
+
+---
+
+## 12d. PATCH `/vaults/:id/underlying-assets-by-mint` - Persist Updated Basket to DB [Authenticated]
+
+After the on-chain `updateUnderlyingAssets` tx confirms, call this endpoint to sync the DB record. **Metadata-only — no on-chain interaction.** The DTO uses `pct_bps` (DB field name), NOT `mintBps`.
+
+The chain-event pipeline will eventually sync the DB on its own as on-chain events are processed, so this endpoint is needed only when synchronous DB consistency is required (e.g. agent immediately reads `/vaults/user` after the on-chain submit and expects the new basket to appear).
+
+**Path Params:**
+
+| Param | Description |
+|-------|-------------|
+| `id` | Vault ID (Mongo `_id`) — same id used in Section 12c |
+
+**Request Body:**
+```json
+{
+  "underlyingAssets": [
+    { "mintAddress": "So11111111111111111111111111111111111111112", "pct_bps": 5000 },
+    { "mintAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "pct_bps": 5000 }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `underlyingAssets[].mintAddress` | string | Yes | Solana mint address (no symbol/name resolution here — pass mint directly) |
+| `underlyingAssets[].pct_bps` | number (0-10000) | Yes | Allocation in basis points. Must sum to **10000**. |
+
+**Response (200):** Returns the updated `VaultFactory` document with the new `underlyingAssets` array. The agent's vault-list caches (`agent:vaults:*`) are flushed automatically as part of this request — the next `/vaults/user` or `/vaults/featured/list` call reflects the new basket immediately.
+
+**Errors:** `400` Vault not found / invalid mint / pct_bps don't sum to 10000 | `401` Invalid or missing JWT
+
+---
+
 ## 14. POST `/policy/dry-run` - Simulate Policy Evaluation [Authenticated]
 
 Runs a proposed basket + policy against all pre-launch policy rules (asset mode, whitelist/blacklist, min liquidity, min 24h volume, asset count bounds, per-asset allocation bounds) and returns **every** violation in one pass. No DB write, no on-chain cost — use in a tight loop to iterate on basket/policy combinations before calling `/launch-dtf`.
