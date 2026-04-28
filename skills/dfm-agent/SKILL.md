@@ -842,7 +842,7 @@ After launch, the agent autonomously:
 - Executes rebalances via `POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/rebalance` (admin wallet executes behind the scenes)
 - Distributes accrued fees via `POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/distribute-fees` (returns unsigned tx for agent to sign)
 
-**Listing vaults (`/vaults/user`, `/vaults/featured/list`):** both endpoints take the same four query params — `page`, `limit`, `vaultType` (`dtf` | `yield_dtf`), `includeTvl`. Use `/vaults/user` to enumerate the caller's own vaults with pagination and type filtering (preferred over the legacy unpaginated `/dtf/my-vaults`); use `/vaults/featured/list` to surface featured vaults across the platform. Set `includeTvl=true` when the UI needs `totalValueLocked` / `sharePrice`; set `false` for cheaper list-only calls. Iterate `page` until `pagination.hasNext` is `false` (or `pagination.page >= pagination.totalPages`).
+**Listing vaults (`/vaults/user`, `/vaults/featured/list`):** both endpoints take the same four query params — `page`, `limit`, `vaultType` (`dtf` | `yield_dtf`), `includeTvl`. Use `/vaults/user` to enumerate the caller's own vaults with pagination and type filtering (preferred over the legacy unpaginated `/dtf/my-vaults`); use `/vaults/featured/list` to surface featured vaults across the platform. Always send `includeTvl=true` — both endpoints must return `totalValueLocked` and `sharePrice`. Iterate `page` until `pagination.hasNext` is `false` (or `pagination.page >= pagination.totalPages`).
 
 **Mapping natural-language requests to `page`:** translate the user's phrasing literally into the `page` query param.
 

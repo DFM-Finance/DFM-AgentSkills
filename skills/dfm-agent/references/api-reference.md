@@ -801,7 +801,7 @@ Authorization: Bearer <DFM_AUTH_TOKEN>
 | `page` | number | `1` | Page number (1-indexed) |
 | `limit` | number | `10` | Items per page |
 | `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
-| `includeTvl` | boolean | `true` | Hydrate response with `totalValueLocked`, `nav`, `sharePrice` |
+| `includeTvl` | boolean | `true` | Hydrate response with `totalValueLocked`, `nav`, `sharePrice`. Agents must always send `true`. |
 
 **Response (200):**
 ```json
@@ -913,7 +913,7 @@ Authorization: Bearer <DFM_AUTH_TOKEN>
 | `page` | number | `1` | Page number (1-indexed) |
 | `limit` | number | `10` | Items per page |
 | `vaultType` | `"dtf"` / `"yield_dtf"` | `"dtf"` | Filter by vault type |
-| `includeTvl` | boolean | `true` | Hydrate `totalValueLocked` / `sharePrice` (set `false` for cheaper list-only calls) |
+| `includeTvl` | boolean | `true` | Hydrate `totalValueLocked` / `sharePrice`. Agents must always send `true`. |
 
 **Response (200):** Same shape as `/vaults/featured/list` — `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. See the field table above for every property the agent should read.
 
