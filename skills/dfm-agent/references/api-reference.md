@@ -995,7 +995,7 @@ The endpoint resolves each identifier (`mintAddress` / `symbol` / `name`) agains
 
 The `violations[]` array carries every violated rule in one pass — fix all of them before retrying. Same violation codes as Section 6 (`/dtf/:vaultSymbol/rebalance/check`).
 
-**After a successful response:** sign the transaction with `DFM_AGENT_KEYPAIR` and submit on-chain. Use the existing `signAndSend` helper from the Authentication section. After on-chain confirmation, call `PATCH /vaults/:id/underlying-assets-by-mint` (Section 12d) to sync the DB record.
+**After a successful response:** sign the transaction with `DFM_AGENT_KEYPAIR` and submit on-chain. Use the existing `signAndSend` helper from the Authentication section. After on-chain confirmation, call `PATCH /vaults/:id/underlying-assets-by-mint` (Section 12d) to sync the DB record, then trigger a rebalance via `POST /dtf/:symbol/rebalance` (Section 7) — rebalancing is required after a basket change so actual holdings match the new allocations. Ask the user to confirm execution before calling `/rebalance`.
 
 **Errors:** `400` policy violation, validation error, asset not found in asset-allocation, mintBps don't sum to 10000 | `401` Invalid or missing JWT | `404` Vault not found | `404` No constitutional policy found for this vault (vault was not launched via `/launch-dtf`)
 

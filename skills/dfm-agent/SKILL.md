@@ -867,13 +867,13 @@ After launch, the agent autonomously:
 
 All management operations are single API calls. No confirmation needed.
 
-### Step 6: Update Underlying Assets (Autonomous Three-Phase Flow)
+### Step 6: Update Underlying Assets (Four-Phase Flow)
 
-When the user says **"update underlying"**, **"change the basket"**, **"swap assets"**, **"rebalance to X"**, or any phrasing that means "replace the vault's `underlyingAssets` allocations", run this fully-autonomous three-phase flow. **Do not ask for confirmation between phases.**
+When the user says **"update underlying"**, **"change the basket"**, **"swap assets"**, **"rebalance to X"**, or any phrasing that means "replace the vault's `underlyingAssets` allocations", run this four-phase flow. **Do not ask for confirmation between Phases 1–3.** Phase 4 (rebalance) is mandatory after a basket change, but ask the user once before executing it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  UPDATE UNDERLYING — autonomous three-phase flow                          │
+│  UPDATE UNDERLYING — four-phase flow                                      │
 │                                                                          │
 │  Phase 1: DECIDE THE NEW BASKET                                          │
 │    - WebSearch / WebFetch + GET /market-metrics → candidate assets       │
@@ -896,6 +896,17 @@ When the user says **"update underlying"**, **"change the basket"**, **"swap ass
 │      { underlyingAssets: [{ mintAddress, pct_bps }, ...] }               │
 │      (Note: pct_bps, NOT mintBps — different field name)                 │
 │      Auto-flushes agent:vaults:* caches.                                 │
+│                                                                          │
+│  Phase 4: REBALANCE (MANDATORY — ASK USER FIRST)                          │
+│    Ask the user: "Rebalancing is required to apply the new basket.        │
+│      Confirm to execute now?"                                            │
+│    On confirm:                                                           │
+│      POST /api/v2/agent/dtf/:symbol/rebalance                            │
+│        { signerPublicKey }                                               │
+│      Admin wallet executes swaps server-side.                            │
+│    On decline: warn the user that the on-chain basket targets the         │
+│      new allocations but the vault's holdings still match the old        │
+│      basket; drift persists until they trigger a rebalance later.        │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1029,9 +1040,21 @@ req.end();
 
 **Why both phases?** Phase 2 mutates on-chain state; Phase 3 makes the change visible to read endpoints (`/vaults/user`, `/vaults/featured/list`) immediately. The chain-event pipeline does eventually backfill the DB on its own, but PATCH gives synchronous visibility — the user expects "show me my vault" to reflect the new basket immediately after they say "update underlying".
 
-#### After both phases succeed
+#### Phase 4 — Rebalance (mandatory, with user confirmation)
 
-Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset1 pct1%, asset2 pct2%, ...>`. On-chain signature: `<sig>`." The agent should NEVER expose endpoint names, payload shapes, or HTTP methods in user-facing messages — only the outcome.
+After Phase 3 completes, the on-chain basket targets the new allocations but the vault still holds the old asset mix. Rebalancing is **required** to bring actual holdings in line with the new basket — without it, the vault drifts.
+
+**Ask the user once** in plain language before triggering it: e.g. *"The basket update is on-chain and synced. Rebalancing to the new allocations is required — confirm to execute now?"* Then call:
+
+`POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/rebalance` with `{ signerPublicKey }`.
+
+This is the same `/rebalance` endpoint used in the rebalance section — the admin wallet executes the swaps server-side, so the agent only sends the request and surfaces the result. Use the `vaultSymbol` (not `vaultId`) returned from Phase 2 / Phase 3.
+
+If the user **declines**, surface a one-line warning: the on-chain basket targets the new allocations but actual holdings still match the old basket; the drift persists until they later say "rebalance the vault".
+
+#### After all phases succeed
+
+Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset1 pct1%, asset2 pct2%, ...>` and rebalanced. On-chain signatures — update: `<updateSig>`, rebalance: `<rebalanceSig>`." The agent should NEVER expose endpoint names, payload shapes, or HTTP methods in user-facing messages — only the outcome.
 
 #### CRITICAL ERROR HANDLING for update underlying
 
@@ -1040,6 +1063,7 @@ Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset
 3. **Signing/submission fails on-chain**: you MAY retry `/update-assets-tx` to get a fresh blockhash + fresh policy check (policy may have drifted in the meantime). Same `signerPublicKey` and same basket — no other changes needed.
 4. **On-chain submitted but Phase 3 (PATCH) fails**: do NOT re-run `/update-assets-tx` (the on-chain change already happened — don't double-update). Retry the PATCH with the **same body**. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB on its own.
 5. **`/update-assets-tx` returns 404 "No constitutional policy found"**: the vault was created outside the agent flow (no `/launch-dtf`). Update is blocked. Surface this to the user — there's nothing to fix from the agent side.
+6. **Phase 4 (rebalance) fails after Phase 3 succeeded**: do NOT re-run `/update-assets-tx` or PATCH (the basket change is already complete on-chain and in the DB). Retry `POST /dtf/:symbol/rebalance` with the same body. If it keeps failing, surface to the user: the basket has been updated but the vault's holdings still match the old basket — they should retry the rebalance later via "rebalance the vault".
 
 ### Policy Violation Handling
 
