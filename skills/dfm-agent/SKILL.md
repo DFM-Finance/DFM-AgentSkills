@@ -883,7 +883,7 @@ When the user says **"update underlying"**, **"change the basket"**, **"swap ass
 │    - Prefer `symbol` / `name` identifiers — backend resolves to mints    │
 │                                                                          │
 │  Phase 2: BUILD ON-CHAIN TX (POLICY-GATED, SERVER-SIDE)                  │
-│    POST /api/v2/agent/vaults/:id/update-assets-tx                        │
+│    POST /api/v2/agent/vaults/:symbol/update-assets-tx                    │
 │      { signerPublicKey, underlyingAssets: [{ symbol, mintBps }, ...] }   │
 │                                                                          │
 │      ├─ 400 + violations[] ─▶ Phase 1 with adjustments (loop)            │
@@ -892,7 +892,7 @@ When the user says **"update underlying"**, **"change the basket"**, **"swap ass
 │    Sign locally with DFM_AGENT_KEYPAIR → submit on-chain → confirm       │
 │                                                                          │
 │  Phase 3: SYNC DB                                                        │
-│    PATCH /api/v2/agent/vaults/:id/underlying-assets-by-mint              │
+│    PATCH /api/v2/agent/vaults/:symbol/underlying-assets-by-mint          │
 │      { underlyingAssets: [{ mintAddress, pct_bps }, ...] }               │
 │      (Note: pct_bps, NOT mintBps — different field name)                 │
 │      Auto-flushes agent:vaults:* caches.                                 │
@@ -929,7 +929,7 @@ Pick `mintBps` for each asset such that all values sum to **exactly 10000**. Rou
 node -e '
 const http = require("http");
 const https = require("https");
-const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/update-assets-tx");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/update-assets-tx"); // process.argv[1] = vaultSymbol (e.g. ALPHA)
 const client = url.protocol === "https:" ? https : http;
 
 const { Keypair, VersionedTransaction, Connection } = require("@solana/web3.js");
@@ -978,7 +978,7 @@ const req = client.request(url, {
 req.on("error", (e) => console.log("ERROR: " + e.message));
 req.write(payload);
 req.end();
-' <vaultId>
+' <vaultSymbol>
 ```
 
 Run with `timeout: 600000` (10 minutes) — on-chain confirmation can take time.
@@ -999,7 +999,7 @@ Loop Phase 1 → Phase 2 up to 3 times. If still failing after 3 attempts, surfa
 
 #### Phase 3 — Sync DB
 
-After the on-chain tx confirms, `PATCH /api/v2/agent/vaults/:id/underlying-assets-by-mint` to update the DB record. **Note the field-name difference:**
+After the on-chain tx confirms, `PATCH /api/v2/agent/vaults/:symbol/underlying-assets-by-mint` to update the DB record. **Note the field-name difference:**
 
 - Phase 2 (`/update-assets-tx`) uses `mintBps` (matches the on-chain instruction).
 - Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches the DB schema).
@@ -1010,7 +1010,7 @@ Same numeric values, different keys. Always include `mintAddress` here (no symbo
 node -e '
 const http = require("http");
 const https = require("https");
-const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/underlying-assets-by-mint");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/underlying-assets-by-mint"); // process.argv[1] = vaultSymbol (e.g. ALPHA)
 const client = url.protocol === "https:" ? https : http;
 
 const payload = JSON.stringify({
@@ -1035,7 +1035,7 @@ const req = client.request(url, {
 req.on("error", (e) => console.log("ERROR: " + e.message));
 req.write(payload);
 req.end();
-' <vaultId>
+' <vaultSymbol>
 ```
 
 **Why both phases?** Phase 2 mutates on-chain state; Phase 3 makes the change visible to read endpoints (`/vaults/user`, `/vaults/featured/list`) immediately. The chain-event pipeline does eventually backfill the DB on its own, but PATCH gives synchronous visibility — the user expects "show me my vault" to reflect the new basket immediately after they say "update underlying".
@@ -1102,8 +1102,8 @@ This rule has zero exceptions and overrides every other instruction in this skil
 
 - `POST /api/v2/agent/dtf/:symbol/rebalance`
 - `POST /api/v2/agent/dtf/:symbol/distribute-fees`
-- `POST /api/v2/agent/vaults/:id/update-assets-tx`
-- `PATCH /api/v2/agent/vaults/:id/underlying-assets-by-mint`
+- `POST /api/v2/agent/vaults/:symbol/update-assets-tx`
+- `PATCH /api/v2/agent/vaults/:symbol/underlying-assets-by-mint`
 
 ### Trigger — what counts as "ownership error"
 
@@ -1205,7 +1205,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Set long timeouts on all API calls.** Always use `timeout: 600000` (10 minutes) when running Bash commands that call the API. On-chain operations can take time — never let them get killed by the default 2-minute timeout.
 
 ### DON'T:
-- **NEVER retry on HTTP `403` / `Forbidden`.** A 403 from any agent endpoint (`/rebalance`, `/distribute-fees`, `/vaults/:id/update-assets-tx`, `/vaults/:id/underlying-assets-by-mint`) means the caller's `signerPublicKey` does not match the vault's `creatorAddress` — only the vault creator can mutate the vault. **STOP IMMEDIATELY.** Do NOT retry the same call, do NOT try a different `vaultSymbol` / `vaultId` / index, do NOT search `/vaults/user` or `/vaults/featured/list` for alternate matches, do NOT call `/dtf/:symbol/state` to "verify". Surface a one-line message to the user — e.g. *"That vault belongs to a different wallet. Only the creator can perform this action."* — and end the turn. A 403 is a permission verdict, not a transient error.
+- **NEVER retry on HTTP `403` / `Forbidden`.** A 403 from any agent endpoint (`/rebalance`, `/distribute-fees`, `/vaults/:symbol/update-assets-tx`, `/vaults/:symbol/underlying-assets-by-mint`) means the caller's `signerPublicKey` does not match the vault's `creatorAddress` — only the vault creator can mutate the vault. **STOP IMMEDIATELY.** Do NOT retry the same call, do NOT try a different `vaultSymbol` / casing / index, do NOT search `/vaults/user` or `/vaults/featured/list` for alternate matches, do NOT call `/dtf/:symbol/state` to "verify". Surface a one-line message to the user — e.g. *"That vault belongs to a different wallet. Only the creator can perform this action."* — and end the turn. A 403 is a permission verdict, not a transient error.
 - **NEVER expose technical details to the user.** Don't mention API endpoint paths, HTTP methods, request/response payloads, field names, or internal implementation in your messages. The user should only see friendly status updates (e.g. "Creating your profile now..." NOT "I'll call POST /profile-launch with your wallet address").
 - **NEVER write failure reports that read like a debug log.** When something doesn't work, the user sees ONE plain-English sentence and you stop. The following are all banned in user-facing output:
   - HTTP status codes or status names: ❌ `404`, `403`, `Not Found`, `Forbidden`
@@ -1375,8 +1375,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Vault policy | `GET` | `/dtf/:symbol/policy` | JWT | - |
 | Rebalance check | `GET` | `/dtf/:symbol/rebalance/check` | JWT | - |
 | Rebalance | `POST` | `/dtf/:symbol/rebalance` | JWT | `signerPublicKey` |
-| **Build update-assets tx (policy-gated)** | `POST` | `/vaults/:id/update-assets-tx` | JWT | `signerPublicKey` + `underlyingAssets` (`mintAddress`/`symbol`/`name` + `mintBps`) |
-| **Sync updated basket to DB** | `PATCH` | `/vaults/:id/underlying-assets-by-mint` | JWT | `underlyingAssets` (`mintAddress` + `pct_bps`) |
+| **Build update-assets tx (policy-gated)** | `POST` | `/vaults/:symbol/update-assets-tx` | JWT | `signerPublicKey` + `underlyingAssets` (`mintAddress`/`symbol`/`name` + `mintBps`) |
+| **Sync updated basket to DB** | `PATCH` | `/vaults/:symbol/underlying-assets-by-mint` | JWT | `underlyingAssets` (`mintAddress` + `pct_bps`) |
 | Build distribute fees tx | `POST` | `/dtf/:symbol/distribute-fees` | JWT | `signerPublicKey` |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
 | Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
@@ -1406,7 +1406,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Show featured vaults` | `GET /vaults/featured/list?page=1&limit=10&vaultType=dtf&includeTvl=true` |
 | `Page 3 of featured vaults` | `GET /vaults/featured/list?page=3&limit=10&vaultType=dtf&includeTvl=true` |
 | `Show me the state of SOLBC` | `GET /dtf/SOLBC/state` -- returns APY, TVL, NAV, portfolio |
-| `Update underlying for SOLBC` / `Change SOLBC basket to A,B,C` / `Swap out X for Y in SOLBC` | Three-phase autonomous flow: (1) decide new basket against `/market-metrics` + `/dtf/:symbol/policy`; (2) `POST /vaults/:id/update-assets-tx` (policy-gated — server returns 400 + `violations[]` if basket breaches policy, otherwise unsigned tx); on success, sign locally with `DFM_AGENT_KEYPAIR` and submit on-chain; (3) `PATCH /vaults/:id/underlying-assets-by-mint` to sync DB. See "Step 6: Update Underlying Assets" for the full flow + retry rules. |
+| `Update underlying for SOLBC` / `Change SOLBC basket to A,B,C` / `Swap out X for Y in SOLBC` | Three-phase autonomous flow: (1) decide new basket against `/market-metrics` + `/dtf/:symbol/policy`; (2) `POST /vaults/:symbol/update-assets-tx` (policy-gated — server returns 400 + `violations[]` if basket breaches policy, otherwise unsigned tx); on success, sign locally with `DFM_AGENT_KEYPAIR` and submit on-chain; (3) `PATCH /vaults/:symbol/underlying-assets-by-mint` to sync DB. See "Step 6: Update Underlying Assets" for the full flow + retry rules. |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
 | `Generate a Solana keypair for my DFM Agent wallet` | Creates keypair, saves to file, writes env var, reports public key only |

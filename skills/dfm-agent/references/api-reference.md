@@ -923,7 +923,7 @@ Authorization: Bearer <DFM_AUTH_TOKEN>
 
 ---
 
-## 12c. POST `/vaults/:id/update-assets-tx` - Build Update-Assets Transaction (Policy-Gated, On-Chain) [Authenticated]
+## 12c. POST `/vaults/:symbol/update-assets-tx` - Build Update-Assets Transaction (Policy-Gated, On-Chain) [Authenticated]
 
 **Two-step gated build, server-side:**
 
@@ -936,7 +936,7 @@ The endpoint resolves each identifier (`mintAddress` / `symbol` / `name`) agains
 
 | Param | Description |
 |-------|-------------|
-| `id` | Vault ID (Mongo `_id`) — get from `/vaults/user` (`data[]._id`) or `/vaults/featured/list` |
+| `symbol` | Vault symbol (e.g. `ALPHA`). Case-insensitive match against `VaultFactory.vaultSymbol`. Get from `/vaults/user` (`data[].vaultSymbol`) or `/vaults/featured/list`. |
 
 **Request Body:**
 ```json
@@ -997,13 +997,13 @@ The endpoint resolves each identifier (`mintAddress` / `symbol` / `name`) agains
 
 The `violations[]` array carries every violated rule in one pass — fix all of them before retrying. Same violation codes as Section 6 (`/dtf/:vaultSymbol/rebalance/check`).
 
-**After a successful response:** sign the transaction with `DFM_AGENT_KEYPAIR` and submit on-chain. Use the existing `signAndSend` helper from the Authentication section. After on-chain confirmation, call `PATCH /vaults/:id/underlying-assets-by-mint` (Section 12d) to sync the DB record, then trigger a rebalance via `POST /dtf/:symbol/rebalance` (Section 7) — rebalancing is required after a basket change so actual holdings match the new allocations. Ask the user to confirm execution before calling `/rebalance`.
+**After a successful response:** sign the transaction with `DFM_AGENT_KEYPAIR` and submit on-chain. Use the existing `signAndSend` helper from the Authentication section. After on-chain confirmation, call `PATCH /vaults/:symbol/underlying-assets-by-mint` (Section 12d) to sync the DB record, then trigger a rebalance via `POST /dtf/:symbol/rebalance` (Section 7) — rebalancing is required after a basket change so actual holdings match the new allocations. Ask the user to confirm execution before calling `/rebalance`.
 
-**Errors:** `400` policy violation, validation error, asset not found in asset-allocation, mintBps don't sum to 10000 | `401` Invalid or missing JWT | `404` Vault not found | `404` No constitutional policy found for this vault (vault was not launched via `/launch-dtf`)
+**Errors:** `400` policy violation, validation error, asset not found in asset-allocation, mintBps don't sum to 10000 | `401` Invalid or missing JWT | `403` Only the vault creator can perform this action | `404` Vault not found for the given symbol | `404` No constitutional policy found for this vault (vault was not launched via `/launch-dtf`)
 
 ---
 
-## 12d. PATCH `/vaults/:id/underlying-assets-by-mint` - Persist Updated Basket to DB [Authenticated]
+## 12d. PATCH `/vaults/:symbol/underlying-assets-by-mint` - Persist Updated Basket to DB [Authenticated]
 
 After the on-chain `updateUnderlyingAssets` tx confirms, call this endpoint to sync the DB record. **Metadata-only — no on-chain interaction.** The DTO uses `pct_bps` (DB field name), NOT `mintBps`.
 
@@ -1013,7 +1013,7 @@ The chain-event pipeline will eventually sync the DB on its own as on-chain even
 
 | Param | Description |
 |-------|-------------|
-| `id` | Vault ID (Mongo `_id`) — same id used in Section 12c |
+| `symbol` | Vault symbol (e.g. `ALPHA`) — same symbol used in Section 12c |
 
 **Request Body:**
 ```json
@@ -1032,7 +1032,7 @@ The chain-event pipeline will eventually sync the DB on its own as on-chain even
 
 **Response (200):** Returns the updated `VaultFactory` document with the new `underlyingAssets` array. The agent's vault-list caches (`agent:vaults:*`) are flushed automatically as part of this request — the next `/vaults/user` or `/vaults/featured/list` call reflects the new basket immediately.
 
-**Errors:** `400` Vault not found / invalid mint / pct_bps don't sum to 10000 | `401` Invalid or missing JWT
+**Errors:** `400` invalid mint / pct_bps don't sum to 10000 | `401` Invalid or missing JWT | `403` Only the vault creator can perform this action | `404` Vault not found for the given symbol
 
 ---
 
