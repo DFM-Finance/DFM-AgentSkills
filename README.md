@@ -105,7 +105,7 @@ If your token has expired (30-day limit), tell your AI agent:
 Refresh my agent token
 ```
 
-It will ask for your wallet address and auto-refresh the token via `POST /token/refresh-by-wallet`.
+It auto-refreshes the token via `POST /token/refresh-by-wallet`. The agent derives the agent wallet address from `DFM_AGENT_KEYPAIR` — no prompt is needed as long as the keypair env var is still set.
 
 ## What it does
 
