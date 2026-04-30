@@ -172,13 +172,12 @@ for (const v of envVars) {
 
 **If `DFM_AUTH_TOKEN` is SET but any API call returns 401 (Unauthorized / token expired):**
 
-1. Ask the user for their **DFM-registered wallet address** (only if you don't already know it).
-2. Run the **token refresh script below** with the wallet address. The script calls `POST {DFM_API_URL}/api/v2/agent/token/refresh-by-wallet`, writes the new JWT to `.claude/settings.json`, and **replaces** any existing `export DFM_AUTH_TOKEN=` line in `~/.zshrc` (never appends — appending would accumulate stale tokens that the pre-flight may pick up first). The token value is **never printed**.
-3. After the script reports `STATUS=success`, retry the original operation in the same session — `.claude/settings.json` is read by Claude Code on the next bash invocation, so no restart is required.
+1. Run the **token refresh script below**. The script derives the **agent wallet address** from `DFM_AGENT_KEYPAIR` (no user prompt required), calls `POST {DFM_API_URL}/api/v2/agent/token/refresh-by-wallet` with the agent wallet address, writes the new JWT to `.claude/settings.json`, and **replaces** any existing `export DFM_AUTH_TOKEN=` line in `~/.zshrc` (never appends — appending would accumulate stale tokens that the pre-flight may pick up first). The token value is **never printed**.
+2. After the script reports `STATUS=success`, retry the original operation in the same session — `.claude/settings.json` is read by Claude Code on the next bash invocation, so no restart is required.
 
 **DO NOT improvise the refresh.** Earlier improvised attempts have written literal placeholder strings (e.g. `+token+`) into `settings.json`. Always use this exact script.
 
-Write the script once to `.claude/refresh-token.js`, then run it with `node .claude/refresh-token.js <WALLET_ADDRESS>`:
+Write the script once to `.claude/refresh-token.js`, then run it with `node .claude/refresh-token.js`:
 
 ```javascript
 const http = require("http");
@@ -186,13 +185,21 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { Keypair } = require("@solana/web3.js");
+const bs58 = require("bs58").default || require("bs58");
 
 const apiUrl = process.env.DFM_API_URL;
-const walletAddress = process.argv[2];
+const agentSecret = process.env.DFM_AGENT_KEYPAIR;
 if (!apiUrl) { console.log("ERROR: DFM_API_URL not set"); process.exit(1); }
-if (!walletAddress) { console.log("ERROR: usage: node refresh-token.js <walletAddress>"); process.exit(1); }
+if (!agentSecret) {
+  console.log("ERROR: DFM_AGENT_KEYPAIR not set — cannot derive agent wallet for refresh");
+  process.exit(1);
+}
 
-const payload = JSON.stringify({ walletAddress });
+// Derive the agent's on-chain wallet address from the keypair env var.
+const agentWalletAddress = Keypair.fromSecretKey(bs58.decode(agentSecret)).publicKey.toBase58();
+
+const payload = JSON.stringify({ agentWalletAddress });
 const url = new URL(apiUrl + "/api/v2/agent/token/refresh-by-wallet");
 const client = url.protocol === "https:" ? https : http;
 
@@ -236,6 +243,7 @@ const req = client.request(url, {
 
       // Output ONLY safe info — NEVER the token
       console.log("STATUS=success");
+      console.log("AGENT_WALLET=" + agentWalletAddress);
       console.log("DFM_AUTH_TOKEN=set");
     } catch (e) {
       console.log("ERROR: " + e.message);
@@ -1380,7 +1388,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Build distribute fees tx | `POST` | `/dtf/:symbol/distribute-fees` | JWT | `signerPublicKey` |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
 | Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
-| Refresh token (by wallet) | `POST` | `/token/refresh-by-wallet` | No | `walletAddress` |
+| Refresh token (by agent wallet) | `POST` | `/token/refresh-by-wallet` | No | `agentWalletAddress` |
 
 ### On-chain operations
 
@@ -1416,7 +1424,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | Problem | Fix |
 |---|---|
 | **HTTP 403 / "Only the vault creator can perform this action" / "is owned by another user"** | Ownership verdict from one of the four ownership-gated endpoints. **See the "HARD STOP — Ownership errors" section earlier in this skill — that rule is absolute.** Surface ONE sentence VERBATIM: *"DFM platform doesn't recognize you as the owner of this vault, so this action can't be performed."* (or with the vault's display name interpolated). Stop the turn. No retries, no alternate symbol / id / index lookups, no searches across vault listing endpoints, no probing other vaults, no environment / token / keypair suggestions, no "what this means" / "what to do" sections. |
-| **"Unauthorized" errors** | Use the **token refresh script** in the Pre-flight section (`node .claude/refresh-token.js <wallet>`). Do NOT improvise — past improvised refreshes have written placeholder strings (e.g. `+token+`) into `settings.json`. If you see `+token+` or other obviously-bogus values in `.claude/settings.json`, delete the `DFM_AUTH_TOKEN` entry and re-run the refresh script. |
+| **"Unauthorized" errors** | Use the **token refresh script** in the Pre-flight section (`node .claude/refresh-token.js`). The script derives the agent wallet address from `DFM_AGENT_KEYPAIR` automatically — no CLI args required. Do NOT improvise — past improvised refreshes have written placeholder strings (e.g. `+token+`) into `settings.json`. If you see `+token+` or other obviously-bogus values in `.claude/settings.json`, delete the `DFM_AUTH_TOKEN` entry and re-run the refresh script. |
 | **`/launch-dtf` returns 400 with `violations[]`** | Policy validation failed — nothing landed on-chain. Read every violation in the array and fix in one pass (adjust `policy` thresholds, swap assets, or rebalance `pct_bps`). Run `/policy/dry-run` to iterate cheaply. Only retry `/launch-dtf` once dry-run is clean. |
 | **`/policy/dry-run` keeps returning the same violation** | Likely a mismatch between the `min_amm_liquidity_usd` / `min_24h_volume_usd` in the policy and the `/market-metrics` numbers for the weakest included asset. Either lower the threshold below the asset's real number, or drop/swap the asset. Do NOT set thresholds above what an included asset actually has — the asset will be perma-flagged. |
 | **`/market-metrics` returns null values for some assets** | Transient Jupiter fetch miss. Retry the call; the service caches per mint so the second call usually succeeds. If persistent, drop the asset — the policy engine can't validate Rule 2/3 for it either. |
@@ -1432,7 +1440,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **On-chain update succeeded but `PATCH /underlying-assets-by-mint` failed** | Do NOT re-run `/update-assets-tx` (the on-chain change already happened — re-running would double-update and likely fail re-validation). Retry the PATCH with the same body. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB. |
 | **Field-name confusion: `mintBps` vs `pct_bps`** | Phase 2 (`/update-assets-tx`) uses `mintBps` (matches on-chain instruction). Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches DB schema). Same numeric values, different keys — don't copy-paste between payloads without renaming. |
 | **409 "Username is already taken" on profile-launch** | The `profile-launch.js` script auto-retries up to 5 times with a random 4-char hex suffix appended to the sanitized base username. If you see this error surface to the user, the script ran out of retries — pick a more distinctive base username and re-run. |
-| **409 "An agent profile already exists for this wallet address" on profile-launch** | The wallet has already been onboarded — do **NOT** call `profile-launch` again (and the script does not retry on this 409). Use `node .claude/refresh-token.js <WALLET_ADDRESS>` to issue a fresh JWT for the existing agent profile instead. |
+| **409 "An agent profile already exists for this wallet address" on profile-launch** | The wallet has already been onboarded — do **NOT** call `profile-launch` again (and the script does not retry on this 409). Use `node .claude/refresh-token.js` to issue a fresh JWT for the existing agent profile instead (the script derives the agent wallet from `DFM_AGENT_KEYPAIR`). |
 
 ## Security
 

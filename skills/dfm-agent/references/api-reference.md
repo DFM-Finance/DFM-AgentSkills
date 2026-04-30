@@ -694,18 +694,18 @@ Issues a new agent token using the agent's `profileId`. **Existing tokens are NO
 
 ## 11. POST `/token/refresh-by-wallet` - Refresh Agent Token by Wallet [Public]
 
-Issues a new agent token using the wallet address registered on the DFM Dashboard. **Existing tokens are NOT revoked** — multiple active tokens per agent are supported. Use this when you don't have the `profileId` to hand.
+Issues a new agent token scoped to a specific agent profile, identified by its on-chain agent wallet address. **Existing tokens are NOT revoked** — multiple active tokens per agent are supported. The issued JWT is bound to that single agent profile, even if the underlying user has multiple agents linked to their account. Use this when you don't have the `profileId` to hand — the agent wallet is derivable from `DFM_AGENT_KEYPAIR`.
 
 **Request Body:**
 ```json
 {
-  "walletAddress": "YourWalletPublicKeyHere"
+  "agentWalletAddress": "AgentSolanaWalletPublicKeyHere"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `walletAddress` | string | Yes | Base58-encoded public key of the DFM-registered wallet |
+| `agentWalletAddress` | string | Yes | Base58-encoded public key of the agent's Solana wallet (on-chain signer, derivable from `DFM_AGENT_KEYPAIR`) |
 
 **Response (200):**
 ```json
@@ -715,7 +715,7 @@ Issues a new agent token using the wallet address registered on the DFM Dashboar
 }
 ```
 
-**Errors:** `404` No profile or agent found for this wallet address
+**Errors:** `404` No agent profile found for this agent wallet address
 
 ---
 
