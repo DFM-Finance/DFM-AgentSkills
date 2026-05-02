@@ -480,7 +480,7 @@ Response:
 
 Use these numbers to:
 - **Drop candidates that don't meet the strategy's floor** (e.g. reject an asset with `liquidity_usd < 50000` for an aggressive fund).
-- **Calibrate `min_amm_liquidity_usd` and `min_24h_volume_usd`** in the policy below the weakest selected asset's real number — setting the floor above an included asset guarantees a policy violation the agent can't self-heal later (the asset gets "locked" in the basket).
+- **Calibrate `min_amm_liquidity_usd` and `min_24h_volume_usd`** in the policy with a **safety buffer of 30–50% below the weakest selected asset's `/market-metrics` number**. Jupiter snapshots fluctuate intraday — setting the floor *at* the weakest asset's current value guarantees the asset will dip below the floor on a bad snapshot and become "locked" in the basket (the agent can no longer remove it via `/update-assets-tx`, because any intermediate basket that still contains the locked asset fails the volume gate). Concrete rule: **floor = floor(weakest_asset_snapshot × 0.5)**, rounded down to a clean number.
 - **Null values** in `policyRelevant` indicate a transient Jupiter fetch miss; retry after a cache warm-up (the endpoint caches per mint).
 
 Then decide:
@@ -592,12 +592,12 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payloa
     "asset_blacklist": [],
     "min_amm_liquidity_usd": 100000,
     "min_24h_volume_usd": 500000,
-    "min_assets": 3,
-    "max_assets": 12,
+    "min_assets": 2,
+    "max_assets": 8,
     "max_asset_pct": 4000,
     "min_asset_pct": 500,
     "min_stablecoin_pct": 0,
-    "max_rebalance_pct": 2500,
+    "max_rebalance_pct": 7500,
     "min_rebalance_interval_hours": 4,
     "max_rebalances_per_day": 3,
     "max_rebalances_per_week": 14,
@@ -607,6 +607,8 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payloa
   }
 }
 ```
+
+**Headroom rationale (do not copy values blindly):** the launch-time policy must allow the *future* basket migrations the agent will need to perform. See "Future-proofing checklist" below — the agent must run that checklist against the proposed policy *before* sending `/launch-dtf`.
 
 Successful response:
 ```json
@@ -754,7 +756,7 @@ Step 4c `/dtf-create` body (metadata only):
 
 #### Policy field decision guide
 
-The agent MUST decide ALL policy values based on the vault strategy. **These values go into the `policy` sub-object of `/launch-dtf` (Step 4a) — not into `/dtf-create`.** Calibrate the liquidity/volume floors below the weakest selected asset's `/market-metrics` number to avoid locking an asset in violation of the vault's own policy.
+The agent MUST decide ALL policy values based on the vault strategy. **These values go into the `policy` sub-object of `/launch-dtf` (Step 4a) — not into `/dtf-create`.** Calibrate every threshold with **headroom for future basket migrations** — a vault whose own policy makes its basket immutable cannot be rescued by the agent. See "Future-proofing checklist" below before sending `/launch-dtf`.
 
 | Strategy Type | `max_asset_pct` | `min_asset_pct` | `min_amm_liquidity_usd` | `min_24h_volume_usd` | `max_rebalances_per_day` | `min_rebalance_interval_hours` |
 |---|---|---|---|---|---|---|
@@ -763,6 +765,8 @@ The agent MUST decide ALL policy values based on the vault strategy. **These val
 | **Aggressive** (meme, trending) | 5000-6000 | 300 | 50000 | 100000 | 4 | 2 |
 | **Yield** (LSTs, staking, yield) | 4000-5000 | 500-1000 | 500000 | 500000 | 1 | 12 |
 
+The liquidity/volume floors above are **strategy ceilings, not target values**. Always also apply the **0.5× safety buffer** rule against the weakest included asset's actual `/market-metrics` snapshot — pick whichever is *lower* of (strategy table value, weakest_asset_snapshot × 0.5).
+
 Always set:
 - `asset_mode`: choose based on the vault strategy:
   - `"OPEN"` — any asset can be added. No restrictions. Use for broad market / index / aggressive strategies.
@@ -770,13 +774,25 @@ Always set:
   - `"OPEN_BLACKLIST"` — all assets allowed except those in `asset_blacklist`. Use when you want to exclude specific risky assets. Set `asset_blacklist` to the mint addresses to exclude.
   - `"WHITELIST_BLACKLIST"` — only whitelisted assets allowed, with additional blacklist exclusions. Use for strict curated funds with explicit exclusions. Set both `asset_whitelist` and `asset_blacklist`.
   - **Decision rule:** If the user asks for a specific category fund (e.g. "LST fund", "blue chip only", "top 5 DeFi tokens"), use `WHITELIST_ONLY`. If the user asks for broad exposure, use `OPEN`. If the user says "exclude meme coins" or similar, use `OPEN_BLACKLIST`.
-- `min_assets`: set to the number of assets in the vault (or lower)
-- `max_assets`: `12` (hard max)
-- `max_rebalance_pct`: `2000`-`3000` (20-30% max change per rebalance)
+- `min_assets`: **`max(1, launch_basket_count − 1)`**. Never set `min_assets == launch_basket_count` — that traps the basket at exactly that size, with no room to drop a single asset on a future migration. (TOP3S launched with `min_assets: 3, max_assets: 3` — locked forever to a 3-asset basket and any single-asset swap exceeds the per-update cap.)
+- `max_assets`: **`min(12, launch_basket_count + 3)`**, with `12` as the hard ceiling. Always leave room to grow the basket by 2–3 assets.
+- `max_rebalance_pct`: **`5000`–`7500` (50–75%)** for any basket of ≤4 assets; **`3000`–`5000`** is acceptable only for baskets of ≥6 assets where individual weights are already small. **Never set below the value of `2 × max_asset_pct`** — replacing one asset moves *both* the outgoing weight and the incoming weight, so the aggregate movement is roughly twice the swapped weight. Setting `max_rebalance_pct < 2 × max_asset_pct` makes any single-asset swap structurally impossible. (TOP3S launched with `max_rebalance_pct: 2500` and `max_asset_pct: 5500` — every JUP→ETH swap is mathematically blocked.)
 - `max_rebalances_per_week`: `max_rebalances_per_day * 7` or less
 - `launch_blackout_hours`: `24` (prevent rebalancing in first 24h)
-- `fee_locked`: `true` (always lock fees)
+- `fee_locked`: `true` for index / yield / curated mandates where the management-fee promise is part of the product. Set `false` if the strategy may need to adjust fees as TVL grows (you can always lock later via a policy update; you cannot unlock if the fee was locked at launch).
 - `notes`: brief description of the strategy and policy rationale
+
+#### Future-proofing checklist (run BEFORE `/launch-dtf`)
+
+The agent must mentally tick each of these against the proposed `policy` + basket. Failing any single one is grounds to **adjust the policy and re-run dry-run** — never launch a vault that fails this checklist. The cost of getting it wrong is **terminal**: a misconfigured constitutional policy cannot be relaxed by the agent and effectively bricks the vault for migrations.
+
+1. **Asset-count headroom** — Is `max_assets ≥ launch_basket_count + 2` AND `min_assets ≤ launch_basket_count − 1`? If no → widen the bounds.
+2. **Single-swap feasibility** — Is `max_rebalance_pct ≥ 2 × max_asset_pct`? Equivalent question: if I had to replace the largest-weight asset tomorrow, would the resulting allocation movement fit under `max_rebalance_pct`? If no → raise `max_rebalance_pct` (preferred) or lower `max_asset_pct`.
+3. **Liquidity/volume buffer** — Is `min_amm_liquidity_usd ≤ weakest_asset_snapshot.liquidity_usd × 0.5` AND `min_24h_volume_usd ≤ weakest_asset_snapshot.volume_24h_usd × 0.5`? If no → halve the floors. Snapshots fluctuate; the floor must absorb a 50% intraday dip without locking the asset.
+4. **Removability** — For every asset currently in the basket, simulate a basket without that asset: does the simulated basket still satisfy `min_assets`, `max_asset_pct`, and `min_asset_pct`? If any asset is non-removable, the vault is one bad volume snapshot away from being permanently stuck.
+5. **Catch-22 defence** — If any included asset's `/market-metrics` snapshot is within 30% of the proposed `min_24h_volume_usd` or `min_amm_liquidity_usd`, **lower the floor further or swap the asset**. An asset that hovers near the floor will eventually fall below it, and then no intermediate basket containing it can pass the volume gate, blocking the migration entirely.
+
+If the user's stated strategy (e.g. "exactly 3 concentrated picks") seems to want a rigid policy, do not encode rigidity by tightening the policy bounds. The strategy *intent* belongs in the basket and `notes`; the policy *bounds* belong wide enough to keep the vault manageable.
 
 #### Backend payload rules
 
@@ -996,12 +1012,16 @@ Run with `timeout: 600000` (10 minutes) — on-chain confirmation can take time.
 | Violation code | What to change |
 |---|---|
 | `rule2MinAmmLiquidity` / `rule3Min24hVolume` | Drop the offending asset OR swap it for a more-liquid alternative — the vault's policy threshold is fixed, so the basket must adapt. |
+| `rule4MinMaxAssetCount` | The proposed basket size doesn't fit `min_assets`/`max_assets`. The bounds are fixed — either reshape the basket OR if the vault was launched with `min_assets == max_assets`, see "structurally locked policy" below. |
 | `rule5MaxPctPerAsset` | Reduce that asset's `mintBps` and redistribute to others. |
 | `rule6MinPctPerAssetIfHeld` | Either raise the asset above the floor OR drop it from the basket entirely. |
 | `rule7MinStablecoinFloor` | Add a stablecoin allocation (must be one already in `asset-allocation` and permitted by `asset_mode`). |
 | `rule1WhitelistBlacklist` / `assetModeViolation` | Remove the asset (it's blacklisted or not whitelisted in the vault's existing policy). |
+| **Per-update movement cap** (rejection mentions `max_rebalance_pct`) | Aggregate movement = sum of `|new_bps - old_bps|` across every mint. If this exceeds `max_rebalance_pct`, the swap won't fit. Try a smaller-step migration (move a fraction of the desired weight first, repeat after `min_rebalance_interval_hours`). If even a single-asset swap exceeds the cap, the policy is structurally locked — see below. |
 
-Loop Phase 1 → Phase 2 up to 3 times. If still failing after 3 attempts, surface the unresolved violations to the user with the suggestion to either change the vault's policy out-of-band or pick a different basket strategy.
+Loop Phase 1 → Phase 2 up to 3 times. If still failing after 3 attempts, surface the unresolved violations to the user.
+
+**Diagnosing a structurally locked policy:** if the same `rule4MinMaxAssetCount` keeps firing because `min_assets == max_assets`, OR every single-asset swap exceeds `max_rebalance_pct` (test: `2 × max_asset_pct > max_rebalance_pct`), OR an included asset's volume sits within 30% of `min_24h_volume_usd` and `rule3Min24hVolume` blocks every migration that still contains it — the vault was misconfigured at launch and the agent cannot self-heal. State the diagnosis to the user with the specific bound that needs to move, and stop. Don't loop indefinitely on a vault that math says is unfixable.
 
 **Signing:** use the existing `signAndSend` helper from the Pre-Flight Auth section. The signed tx hits Solana RPC; wait for `confirmed` commitment before moving to Phase 3.
 
@@ -1437,6 +1457,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **`/update-assets-tx` returns 400 + `violations[]`** | Policy gate failed — nothing on-chain. Read every entry in `violations[]`, adjust the basket per the table in "Step 6: Update Underlying Assets", and retry. Free — no signing, no on-chain cost. Loop up to 3 times before surfacing to the user. |
 | **`/update-assets-tx` returns 400 "asset not available"** | A `symbol` or `name` you passed isn't in `asset-allocation`. Either pass the `mintAddress` directly OR pick a different asset whose symbol the platform knows about (verify against `/market-metrics`). |
 | **`/update-assets-tx` returns 404 "No constitutional policy found"** | Vault was not launched via `/launch-dtf`, so it has no policy to validate against. Updates are blocked at the agent layer for safety. Surface to the user — there's nothing the agent can fix here. |
+| **Every `/update-assets-tx` attempt fails policy: rule4 (asset count) + rule on per-update movement, on a vault the agent can't migrate at all** | Vault was launched with a *structurally locked* policy — typically `min_assets == max_assets` (no room to grow/shrink) and/or `max_rebalance_pct < 2 × max_asset_pct` (single-asset swaps mathematically exceed the cap). Compounding the lock-in: an included asset's volume often dips below `min_24h_volume_usd`, so any intermediate basket that still contains it fails the gate. **The agent cannot self-heal this** — the policy is fixed for the vault's life, and migration requires a platform-supported policy update. Surface the diagnosis to the user (which combination of `min_assets`/`max_assets`/`max_rebalance_pct`/floors is incompatible with the desired migration) and stop. **Do not launch new vaults with these traps**: run the "Future-proofing checklist" in Step 4a before sending `/launch-dtf`. |
 | **On-chain update succeeded but `PATCH /underlying-assets-by-mint` failed** | Do NOT re-run `/update-assets-tx` (the on-chain change already happened — re-running would double-update and likely fail re-validation). Retry the PATCH with the same body. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB. |
 | **Field-name confusion: `mintBps` vs `pct_bps`** | Phase 2 (`/update-assets-tx`) uses `mintBps` (matches on-chain instruction). Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches DB schema). Same numeric values, different keys — don't copy-paste between payloads without renaming. |
 | **409 "Username is already taken" on profile-launch** | The `profile-launch.js` script auto-retries up to 5 times with a random 4-char hex suffix appended to the sanitized base username. If you see this error surface to the user, the script ran out of retries — pick a more distinctive base username and re-run. |
