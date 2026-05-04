@@ -429,6 +429,7 @@ Use this skill when:
 - The user asks to research tokens/markets and create a fund
 - The user wants to check vault state, policy, or rebalancing status
 - The user asks to rebalance a vault or distribute fees
+- The user asks to **deposit USDC into a vault** or **redeem vault tokens** (capital flows are agent-bound — see "Step 7: Capital Flows")
 - The user needs to set up agent auth (wallet generation, token management)
 
 ## Autonomous DTF Launch -- How It Works
@@ -1094,6 +1095,377 @@ Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset
 6. **Phase 4 (rebalance) fails after Phase 3 succeeded**: do NOT re-run `/update-assets-tx` or PATCH (the basket change is already complete on-chain and in the DB). Retry `POST /dtf/:symbol/rebalance` with the same body. If it keeps failing, surface to the user: the basket has been updated but the vault's holdings still match the old basket — they should retry the rebalance later via "rebalance the vault".
 7. **Any phase returns HTTP 403 / "Only the vault creator can perform this action"**: the agent wallet (`signerPublicKey`) does not match the vault's `creatorAddress`. **STOP — do NOT retry, do NOT try a different vault symbol or id, do NOT loop through `/vaults/user` or `/vaults/featured/list` looking for matches.** Surface to the user: *"That vault belongs to a different wallet. Only its creator can update it."* End the turn.
 
+### Step 7: Capital Flows — Deposit & Redeem
+
+When the user says **"deposit USDC into SOLBC"**, **"buy SOLBC shares"**, **"redeem 1.5 SOLBC"**, **"sell my SOLBC tokens"**, or any phrasing meaning "move capital in or out of a vault using the agent wallet", run one of the two flows below.
+
+```
++--------------------------------------------------------------------+
+|  CAPITAL FLOWS — agent-bound deposit (2 steps) + redeem (5 steps)  |
+|                                                                    |
+|  DEPOSIT (vault USDC fans out into underlyings):                   |
+|    1. POST /vaults/:symbol/check-min-deposit    (MANDATORY GATE)   |
+|         -> abort flow on 400. Do NOT call deposit-tx if the        |
+|         -> threshold is not met.                                   |
+|    2. POST /vaults/:symbol/deposit-tx                              |
+|         -> base64 unsigned VersionedTransaction                    |
+|    3. agent signs locally + submits on-chain                       |
+|    4. POST /deposit-transaction                                    |
+|         -> agentSwap (vault USDC -> underlyings via Jupiter) +     |
+|            depositTransaction (parses logs, persists 4 records)    |
+|                                                                    |
+|  REDEEM (queue-serialised; underlyings fan in to vault USDC):      |
+|    1. POST /check-min-redeem                    (MANDATORY GATE)   |
+|         -> reads `isValid` (returns 200 either way). Abort flow    |
+|         -> when isValid=false. Do NOT call request-ticket.         |
+|    2. POST /redeem/request-ticket               (queue entry)      |
+|    3. poll v1 GET /api/v1/tx-event-management/redeem/ticket-status |
+|         /:ticketId until isReady=true (agent has no clone)         |
+|    4. POST /redeem/execute/:ticketId            (backend swap fan- |
+|         in: underlyings -> USDC inside the vault)                  |
+|    5. POST /vaults/:symbol/redeem-tx                               |
+|         -> base64 unsigned finalizeRedeem tx                       |
+|    6. agent signs locally + submits on-chain                       |
+|    7. POST /redeem-transaction { transactionSignature, ticketId }  |
+|         -> records redeem + auto-confirms ticket (non-fatal)       |
+|                                                                    |
+|  IDENTITY:                                                         |
+|    Deposit-tx takes an explicit `userPublicKey` body field — the   |
+|    depositor wallet may or may not be the agent. Records are       |
+|    attributed via JWT (agentProfile + agentAddress).               |
+|    Redeem-tx is bound to the agent wallet (JWT canonical, body     |
+|    `agentWallet` accepted only as fallback).                       |
+|                                                                    |
+|  PRE-FLIGHT GATES ARE MANDATORY:                                   |
+|    Both flows MUST start with the corresponding check. Skipping    |
+|    them sends underspec'd amounts to the on-chain ix and produces  |
+|    confusing failures (post-fee dust, 0-share mints, etc.).        |
++--------------------------------------------------------------------+
+```
+
+**When to run which flow:**
+
+| User intent | Flow | Notes |
+|---|---|---|
+| "Deposit X USDC into <symbol>" | Deposit | Set `userPublicKey` to the **agent wallet** by default unless the user explicitly names a different depositor wallet. |
+| "Redeem X tokens from <symbol>" / "Sell my <symbol>" | Redeem | Always uses the agent wallet (JWT). The agent must already hold a position keyed on its `agentProfile`. |
+| "Add liquidity to <symbol>" / "Buy more <symbol>" | Deposit | Same as deposit. |
+| "Withdraw from <symbol>" / "Cash out <symbol>" | Redeem | Same as redeem. |
+
+**Pre-flight (both flows):** before issuing build-tx requests, surface a one-line summary to the user (vault, amount, expected fee). The flows below do **not** ask for further confirmation between sub-steps.
+
+**Mandatory minimum-amount gate:** every deposit run MUST begin with `POST /vaults/:symbol/check-min-deposit`, and every redeem run MUST begin with `POST /check-min-redeem`. These are not optional — they are gates on the rest of the flow:
+- `check-min-deposit` throws `400` (`Minimum deposit should be at least $<n> USDC`) when the proposed amount is below threshold. **Do not proceed to `/deposit-tx` on 400** — surface the threshold to the user verbatim, ask them for a larger amount, then re-gate.
+- `check-min-redeem` returns `200` with `isValid: false` when the proposed amount is below threshold (it does **not** throw). **Read `isValid` and abort if `false`** — do not call `/redeem/request-ticket` on a failed check.
+
+The reason the gates are mandatory: skipping them lets through too-small amounts that produce confusing on-chain failures (post-fee dust, zero-share mints, and — for redeem — fractional swaps Jupiter rejects). Catching the issue at the validator endpoint gives the user a clean, actionable error before any on-chain or queue interaction.
+
+#### 7a. Deposit Flow (2 sub-steps after pre-flight)
+
+**Step 7a-0 — Mandatory pre-flight: `/check-min-deposit`**
+
+Always call `POST {DFM_API_URL}/api/v2/agent/vaults/:symbol/check-min-deposit` with `{ minDeposit: <UI USDC> }` **before** building the deposit tx. On `400`, do **not** proceed — surface the threshold message to the user and ask for a larger amount. The script in Step 7a-1 below runs this check internally and aborts on failure.
+
+**Step 7a-1 — Gate, build the unsigned deposit tx, sign, submit**
+
+The combined script below: (1) gates on `/check-min-deposit`, (2) calls `/vaults/:symbol/deposit-tx` with `{ userPublicKey, depositAmount }` (UI USDC), (3) signs locally with `DFM_AGENT_KEYPAIR`, (4) submits on-chain. The backend resolves the vault by symbol, derives PDAs, fetches a fresh KMS-signed share price, conditionally adds 4 ATA-creation ixs (depositor USDC + vault-token, fee-recipient USDC, admin USDC), and emits the Ed25519 verify ix + `deposit(...)` ix.
+
+Returns: `{ transaction, vaultIndex, vaultPda, vaultMintPda, etfSharePriceRaw, priceTimestamp, amountInRaw }` — the latter four must be forwarded **unchanged** into Step 7a-2.
+
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+const { Keypair, VersionedTransaction, Connection } = require("@solana/web3.js");
+const bs58 = require("bs58").default || require("bs58");
+const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
+const symbol = process.argv[1];           // e.g. ALPHA
+const depositAmount = Number(process.argv[2]); // UI USDC, e.g. 5
+
+function call(path, method, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(process.env.DFM_API_URL + path);
+    const client = url.protocol === "https:" ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = { "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN };
+    if (payload) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    const req = client.request(url, { method, headers }, (res) => {
+      let data = ""; res.on("data", (c) => data += c);
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data || "{}") }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+(async () => {
+  // 7a-0 — MANDATORY GATE: /check-min-deposit (throws 400 on fail)
+  const gate = await call("/api/v2/agent/vaults/" + symbol + "/check-min-deposit", "POST", { minDeposit: depositAmount });
+  if (gate.status !== 200) {
+    console.log("MIN_DEPOSIT_FAIL " + gate.status + ": " + (gate.body?.message || JSON.stringify(gate.body)));
+    return;
+  }
+
+  // 7a-1a — Build the unsigned deposit tx
+  const build = await call("/api/v2/agent/vaults/" + symbol + "/deposit-tx", "POST", {
+    userPublicKey: keypair.publicKey.toBase58(),  // agent wallet as depositor (default)
+    depositAmount
+  });
+  if (build.status !== 201) {
+    console.log("BUILD_ERROR " + build.status + ": " + JSON.stringify(build.body));
+    return;
+  }
+
+  // 7a-1b — Sign + submit on-chain
+  const conn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
+  const tx = VersionedTransaction.deserialize(Buffer.from(build.body.transaction, "base64"));
+  tx.sign([keypair]);
+  const sig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
+  await conn.confirmTransaction(sig, "confirmed");
+
+  console.log(JSON.stringify({
+    onChainSig: sig,
+    vaultIndex: build.body.vaultIndex,
+    etfSharePriceRaw: build.body.etfSharePriceRaw,
+    amountInRaw: build.body.amountInRaw,
+    priceTimestamp: build.body.priceTimestamp
+  }));
+})().catch(e => console.log("FATAL " + (e?.message || String(e))));
+' <vaultSymbol> <depositAmount>
+```
+
+Run with `timeout: 600000` (10 minutes). On `MIN_DEPOSIT_FAIL`, surface the message to the user verbatim and stop — do **not** retry without a larger `depositAmount`. On success, stash the printed `{ onChainSig, vaultIndex, etfSharePriceRaw, amountInRaw }` for Step 7a-2.
+
+**Step 7a-2 — Record the deposit (swap fan-out + persist)**
+
+`POST {DFM_API_URL}/api/v2/agent/deposit-transaction` with `{ transactionSignature: onChainSig, vaultIndex, etfSharePriceRaw, amountInRaw, slippage? }`. The agent's identity is read from the JWT.
+
+Backend runs two sub-operations in one call:
+1. **`agentSwap`** — fans the vault's USDC into its underlying assets via Jupiter using the same `vaultIndex` / `amountInRaw` / `etfSharePriceRaw`.
+2. **`depositTransaction`** — parses VaultDeposited logs, persists `DepositTransaction` + `UserVaultPosition` (keyed on `agentProfile`) + `DepositRecord` + History row, forwards the swap signatures as `signatureArray`.
+
+Failure modes are surfaced **inside the 200**: `swap.failedSwapsInfo` (per-asset swap failures + return-tx) and `deposit.events[].vaultDepositUpdateError` (record write threw). The flow does **not** abort on either — surface a warning to the user but treat the deposit as recorded.
+
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/deposit-transaction");
+const client = url.protocol === "https:" ? https : http;
+
+// Pass the four fields from Step 7a-1 as JSON in argv[1]
+const inputs = JSON.parse(process.argv[1]);
+const payload = JSON.stringify({
+  transactionSignature: inputs.onChainSig,
+  vaultIndex: inputs.vaultIndex,
+  etfSharePriceRaw: inputs.etfSharePriceRaw,
+  amountInRaw: inputs.amountInRaw,
+  slippage: 200
+});
+
+const req = client.request(url, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+    "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN
+  }
+}, (res) => {
+  let data = ""; res.on("data", (c) => data += c);
+  res.on("end", () => {
+    const json = JSON.parse(data);
+    if (res.statusCode !== 200) {
+      console.log("RECORD_ERROR " + res.statusCode + ": " + data);
+      return;
+    }
+    const failedSwaps = json.swap?.failedSwapsInfo;
+    const recordError = json.deposit?.events?.[0]?.vaultDepositUpdateError;
+    console.log("DEPOSIT_OK"
+      + " event=" + json.deposit?.events?.[0]?.eventType
+      + (failedSwaps ? " WARN_failedSwaps=" + JSON.stringify(failedSwaps) : "")
+      + (recordError ? " WARN_recordError=" + recordError : ""));
+  });
+});
+req.on("error", (e) => console.log("ERROR: " + e.message));
+req.write(payload);
+req.end();
+' "$STEP_7A1_OUTPUT"  # JSON string from Step 7a-1
+```
+
+Surface to the user: *"Deposited `<amount>` USDC into `<vaultName>`. On-chain signature: `<sig>`. `<n>` underlying swaps completed."* If `failedSwapsInfo` is present, append *"`<failedCount>` swap(s) failed and the USDC was returned to the vault — no funds lost."*
+
+#### 7b. Redeem Flow (4 sub-steps after pre-flight)
+
+The redeem flow has more steps because (a) it queues to serialise vault liquidation, and (b) the swap fan-in must happen **before** the on-chain `finalizeRedeem` so the vault has enough USDC to settle.
+
+**Step 7b-0 — Mandatory pre-flight: `/check-min-redeem`**
+
+Always call `POST {DFM_API_URL}/api/v2/agent/check-min-redeem` with `{ minRedeem: <UI vault tokens> }` **before** requesting a ticket. Unlike `check-min-deposit`, this endpoint **always returns 200** with `{ isValid, message }` — read `isValid` rather than the HTTP status. When `isValid: false`, do **not** call `/redeem/request-ticket`; surface the threshold to the user and stop. The combined script in Step 7b-5 below runs this check internally and aborts on failure.
+
+**Step 7b-1 — Request a redeem ticket**
+
+`POST {DFM_API_URL}/api/v2/agent/redeem/request-ticket` with `{ vaultSymbol, vaultTokenAmount, etfSharePriceRaw?, slippage? }`. `vaultTokenAmount` is **raw u64 as a string** (6 decimals — multiply UI tokens by 1e6 first). `etfSharePriceRaw` is optional; backend reads on-chain when omitted.
+
+Returns: `{ ticketId, position, estimatedWaitSeconds, isReady }`.
+
+**Step 7b-2 — Poll until ready (use v1 endpoint)**
+
+The agent module has no `/ticket-status` clone. Poll `GET {DFM_API_URL}/api/v1/tx-event-management/redeem/ticket-status/:ticketId` every 3-5 seconds with the same `Authorization` header. Stop when `status.isReady === true`. Tickets expire ~3 minutes after becoming ready — don't dawdle.
+
+**Step 7b-3 — Execute the swap fan-in**
+
+`POST {DFM_API_URL}/api/v2/agent/redeem/execute/:ticketId` with `{ slippage? }`. All other parameters (vault, amount, share price) are read from the ticket itself. Backend transitions the ticket to `PROCESSING`, runs `redeemAgentSwapAdmin` (vault underlyings → USDC), and returns swap signatures.
+
+**On execute failure**, the ticket is **auto-cancelled** by the backend before the error rethrows — the agent does **not** need to call `/cancel`. Surface the error to the user and stop.
+
+**Step 7b-4 — Build the unsigned `finalizeRedeem` tx**
+
+`POST {DFM_API_URL}/api/v2/agent/vaults/:symbol/redeem-tx` with `{ vaultTokenAmount }` (UI vault tokens, e.g. `1.5`). The agent wallet is read from the JWT (body `agentWallet` is fallback only).
+
+Backend resolves the vault, derives PDAs, fetches a fresh KMS-signed share price, conditionally adds 4 ATA-creation ixs (agent vault-token + USDC, fee-recipient USDC, vault-admin USDC), and emits the Ed25519 verify ix + `finalizeRedeem(...)` ix. Returns `{ transaction, vaultIndex, etfSharePriceRaw, priceTimestamp, vaultTokenAmountRaw, ... }`.
+
+**Step 7b-5 — Sign locally, submit, record + auto-confirm ticket**
+
+Sign the returned tx with `DFM_AGENT_KEYPAIR`, submit on-chain, then call `POST {DFM_API_URL}/api/v2/agent/redeem-transaction` with `{ transactionSignature, vaultIndex, etfSharePriceRaw, signatureArray, slippage, ticketId }`.
+
+Including `ticketId` triggers the backend to **auto-confirm** the redeem queue ticket after the record is persisted. The auto-confirm is **non-fatal** — failure surfaces on the response as `ticketConfirm: { ok: false, message }` but does not abort. The redeem is already on-chain and DB-recorded.
+
+```bash
+# End-to-end redeem (Steps 7b-1 through 7b-5) as one node script.
+# Splits into stages internally; each stage logs its own progress.
+node -e '
+const http = require("http");
+const https = require("https");
+const { Keypair, VersionedTransaction, Connection } = require("@solana/web3.js");
+const bs58 = require("bs58").default || require("bs58");
+
+const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
+const symbol = process.argv[1];
+const uiAmount = Number(process.argv[2]); // e.g. 1.5
+
+function call(path, method, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(process.env.DFM_API_URL + path);
+    const client = url.protocol === "https:" ? https : http;
+    const payload = body ? JSON.stringify(body) : null;
+    const headers = {
+      "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN
+    };
+    if (payload) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    const req = client.request(url, { method, headers }, (res) => {
+      let data = ""; res.on("data", (c) => data += c);
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data || "{}") }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+(async () => {
+  const rawAmount = String(Math.round(uiAmount * 1e6));
+
+  // 7b-0 — MANDATORY GATE: /check-min-redeem (returns 200 with isValid; do NOT trust HTTP status alone)
+  const gate = await call("/api/v2/agent/check-min-redeem", "POST", { minRedeem: uiAmount });
+  if (gate.status !== 200 || gate.body?.isValid !== true) {
+    console.log("MIN_REDEEM_FAIL: " + (gate.body?.message || JSON.stringify(gate.body)));
+    return;
+  }
+
+  // 7b-1 — request ticket
+  const ticket = await call("/api/v2/agent/redeem/request-ticket", "POST", {
+    vaultSymbol: symbol,
+    vaultTokenAmount: rawAmount,
+    slippage: 200
+  });
+  if (ticket.status !== 200) { console.log("TICKET_ERROR", ticket); return; }
+  const { ticketId } = ticket.body;
+  console.log("TICKET", ticketId, "ready=" + ticket.body.isReady);
+
+  // 7b-2 — poll v1 ticket-status until ready (max 5 minutes)
+  const start = Date.now();
+  while (Date.now() - start < 5 * 60 * 1000) {
+    if (ticket.body.isReady) break;
+    await new Promise(r => setTimeout(r, 3000));
+    const s = await call("/api/v1/tx-event-management/redeem/ticket-status/" + ticketId, "GET");
+    if (s.body?.isReady) { ticket.body.isReady = true; break; }
+    if (["EXPIRED", "CANCELLED", "COMPLETED"].includes(s.body?.status)) {
+      console.log("TICKET_TERMINAL", s.body.status); return;
+    }
+  }
+  if (!ticket.body.isReady) { console.log("TICKET_TIMEOUT"); return; }
+
+  // 7b-3 — execute (backend swap fan-in)
+  const exec = await call("/api/v2/agent/redeem/execute/" + ticketId, "POST", { slippage: 200 });
+  if (exec.status !== 200) { console.log("EXECUTE_ERROR", exec); return; }
+  const swapSigs = (exec.body.swaps || []).map(s => s.swapSig || s.sig).filter(Boolean);
+  console.log("EXECUTE_OK swaps=" + swapSigs.length);
+
+  // 7b-4 — build unsigned finalizeRedeem tx
+  const build = await call("/api/v2/agent/vaults/" + symbol + "/redeem-tx", "POST", {
+    vaultTokenAmount: uiAmount
+  });
+  if (build.status !== 201) { console.log("BUILD_ERROR", build); return; }
+
+  // Sign + submit on-chain
+  const conn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
+  const tx = VersionedTransaction.deserialize(Buffer.from(build.body.transaction, "base64"));
+  tx.sign([keypair]);
+  const onChainSig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
+  await conn.confirmTransaction(onChainSig, "confirmed");
+  console.log("ONCHAIN_OK", onChainSig);
+
+  // 7b-5 — record + auto-confirm ticket
+  const rec = await call("/api/v2/agent/redeem-transaction", "POST", {
+    transactionSignature: onChainSig,
+    vaultIndex: build.body.vaultIndex,
+    etfSharePriceRaw: build.body.etfSharePriceRaw,
+    signatureArray: swapSigs,
+    slippage: 200,
+    ticketId
+  });
+  if (rec.status !== 200) { console.log("RECORD_ERROR", rec); return; }
+  console.log("REDEEM_OK"
+    + " event=" + rec.body.events?.[0]?.eventType
+    + " netUsdc=" + rec.body.events?.[0]?.netStablecoinAmount
+    + " ticketConfirm=" + JSON.stringify(rec.body.ticketConfirm));
+})().catch(e => console.log("FATAL", e?.message || String(e)));
+' <vaultSymbol> <uiAmount>
+```
+
+Run with `timeout: 600000` (10 minutes). Surface to the user: *"Redeemed `<uiAmount>` `<vaultSymbol>` for `<netUsdcDecimal>` USDC. On-chain signature: `<sig>`."*
+
+#### CRITICAL ERROR HANDLING for capital flows
+
+| Symptom | What to do |
+|---|---|
+| `/check-min-deposit` returns `400 Minimum deposit should be at least $<n> USDC` | **Hard gate — do NOT proceed to `/deposit-tx`.** Surface the threshold verbatim to the user, ask them for a larger amount, then re-run the gate. The gate must pass before any further deposit calls. |
+| `/check-min-redeem` returns `200 { isValid: false, ... }` | **Hard gate — do NOT proceed to `/redeem/request-ticket`.** Surface `message` to the user, ask for a larger amount, then re-run the gate. Note: the endpoint returns HTTP 200 even on fail — read `isValid`, not the status code. |
+| `/deposit-tx` returns `400 Vault "<symbol>" has no on-chain vaultIndex` | The vault hasn't been created on-chain yet — `/launch-dtf` was called but `/dtf-create` (and the on-chain submit between them) never landed. Surface to the user. |
+| `/deposit-tx` returns `400 Signed price vaultPubkey ... does not match derived vault PDA` | KMS signer is mis-configured for this vault. **Do NOT retry** — surface to the user; this is an operator-side fix. |
+| `/deposit-transaction` returns `200` with `swap.failedSwapsInfo` populated | Per-asset Jupiter swap failed and the backend already returned the USDC to the vault. Treat the deposit as recorded; warn the user about the failed swap count. **Do NOT re-call** `/deposit-transaction` — the deposit record already exists. |
+| `/deposit-transaction` returns `200` with `deposit.events[].vaultDepositUpdateError` | The deposit record-write failed but the on-chain swap succeeded. Surface to user. The chain-event pipeline will eventually reconcile. **Do NOT re-call** with the same signature (idempotency guard will surface the existing record). |
+| `/redeem/execute/:ticketId` throws | The ticket is **auto-cancelled** by the backend. Do NOT call `/cancel`. Surface error to user and end. |
+| Ticket polling times out (`isReady` never true within 5 min) | Cancel manually via v1 `DELETE /api/v1/tx-event-management/redeem/cancel/:ticketId` and surface to user. Then call `/redeem/request-ticket` fresh if they want to retry. |
+| `/redeem-tx` returns `400 InvalidPriceSignature` (after signing/submit) | The KMS-signed price expired between build and submit. Re-call `/redeem-tx` to get a fresh price; do NOT submit the stale tx. |
+| `/redeem-transaction` returns `400 No position found for agent in this vault` | The agent has no recorded `UserVaultPosition` for this vault. They must `/deposit` under the agent flow first — a vault funded outside the agent flow won't have a position keyed on `agentProfile`. |
+| `/redeem-transaction` returns `400 Insufficient shares. Have X, trying to redeem Y` | The on-chain redeem already happened but the recorded position has fewer shares than requested. State mismatch — likely a previous redeem that wasn't recorded. Surface the on-chain signature to the user and stop. |
+| `/redeem-transaction` returns `200` with `ticketConfirm.ok = false` | Auto-confirm failed but the redeem is recorded. Optionally call v1 `POST /api/v1/tx-event-management/redeem/confirm/:ticketId` manually with the same signature; queue cleanup is hygiene only. |
+| `403` / "owned by another user" on either flow | **HARD STOP — see "HARD STOP — Ownership errors" earlier.** End the turn with the verbatim sentence. |
+
 ### Policy Violation Handling
 
 Both `/rebalance/check` and `/rebalance` run a **full policy evaluation** against all 11 constitutional policy rules. **Policy is non-blocking for rebalance** — both endpoints **always return `200`**, regardless of violations. Rule violations appear in the response under `policyCheck`:
@@ -1406,14 +1778,24 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Build update-assets tx (policy-gated)** | `POST` | `/vaults/:symbol/update-assets-tx` | JWT | `signerPublicKey` + `underlyingAssets` (`mintAddress`/`symbol`/`name` + `mintBps`) |
 | **Sync updated basket to DB** | `PATCH` | `/vaults/:symbol/underlying-assets-by-mint` | JWT | `underlyingAssets` (`mintAddress` + `pct_bps`) |
 | Build distribute fees tx | `POST` | `/dtf/:symbol/distribute-fees` | JWT | `signerPublicKey` |
+| **Check min deposit** | `POST` | `/vaults/:symbol/check-min-deposit` | JWT | `minDeposit` |
+| **Check min redeem** | `POST` | `/check-min-redeem` | JWT | `minRedeem` (returns 200 with `isValid`, no 400) |
+| **Build deposit tx (Step 1 of 2)** | `POST` | `/vaults/:symbol/deposit-tx` | JWT | `userPublicKey` + `depositAmount` (UI USDC) |
+| **Process deposit — swap + record (Step 2 of 2)** | `POST` | `/deposit-transaction` | JWT | `transactionSignature` + `vaultIndex` + `etfSharePriceRaw` + `amountInRaw` + optional `slippage` |
+| **Request redeem ticket** | `POST` | `/redeem/request-ticket` | JWT | `vaultSymbol` + `vaultTokenAmount` (raw u64 string) + optional `etfSharePriceRaw`/`slippage`/`agentWallet` |
+| **Execute redeem ticket** | `POST` | `/redeem/execute/:ticketId` | JWT | optional `slippage` (vault/amount/price baked into the ticket) |
+| **Build redeem tx (finalize)** | `POST` | `/vaults/:symbol/redeem-tx` | JWT | `vaultTokenAmount` (UI tokens) + optional `agentWallet` (JWT canonical) |
+| **Record redeem + auto-confirm ticket** | `POST` | `/redeem-transaction` | JWT | `transactionSignature` + optional `vaultIndex`/`etfSharePriceRaw`/`signatureArray`/`slippage`/`ticketId` (ticketId triggers auto-confirm) |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
 | Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
 | Refresh token (by agent wallet) | `POST` | `/token/refresh-by-wallet` | No | `agentWalletAddress` |
 
 ### On-chain operations
 
-- **Vault creation** and **fee distribution** return unsigned base64 transactions. The agent signs locally and submits on-chain.
+- **Vault creation**, **fee distribution**, **deposit (Step 1)**, **basket update**, and **redeem finalize** return unsigned base64 transactions. The agent signs locally with `DFM_AGENT_KEYPAIR` and submits on-chain.
 - **Rebalancing** is executed server-side by the admin wallet. The agent only provides its public key for identification.
+- **Deposit Step 2 (`/deposit-transaction`)** and **Redeem Step 3 (`/redeem/execute/:ticketId`)** are server-side swap operations — no client signing. The backend's admin wallet signs the per-asset Jupiter swaps for fan-out (deposit) / fan-in (redeem). The vault's USDC and underlying balances move during these calls.
+- **Redeem flow uses a queue ticket** (`/redeem/request-ticket` → `/ticket-status` polling → `/redeem/execute`) to serialise vault liquidations across concurrent redeemers. Tickets expire ~3 minutes after `isReady=true`.
 
 ### Logo handling
 
@@ -1437,6 +1819,10 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Update underlying for SOLBC` / `Change SOLBC basket to A,B,C` / `Swap out X for Y in SOLBC` | Three-phase autonomous flow: (1) decide new basket against `/market-metrics` + `/dtf/:symbol/policy`; (2) `POST /vaults/:symbol/update-assets-tx` (policy-gated — server returns 400 + `violations[]` if basket breaches policy, otherwise unsigned tx); on success, sign locally with `DFM_AGENT_KEYPAIR` and submit on-chain; (3) `PATCH /vaults/:symbol/underlying-assets-by-mint` to sync DB. See "Step 6: Update Underlying Assets" for the full flow + retry rules. |
 | `Rebalance SOLBC` | Checks policy, triggers server-side rebalance if approved |
 | `Distribute fees for SOLBC` | `POST /dtf/SOLBC/distribute-fees` -- builds unsigned tx, signs locally, submits on-chain |
+| `Deposit 5 USDC into SOLBC` / `Buy 5 USDC of SOLBC shares` / `Add 10 USDC to SOLBC` | **Mandatory gate first**: `POST /vaults/SOLBC/check-min-deposit` `{ minDeposit }`. Abort on 400. Then two-step deposit flow: (1) `POST /vaults/SOLBC/deposit-tx` with `{ userPublicKey: <agent wallet>, depositAmount: 5 }` → sign locally + submit on-chain; (2) `POST /deposit-transaction` with `{ transactionSignature, vaultIndex, etfSharePriceRaw, amountInRaw, slippage: 200 }` → backend fans the vault USDC into the basket via Jupiter and persists 4 records. See "Step 7: Capital Flows" for the full inline `node -e` example. |
+| `Redeem 1.5 SOLBC` / `Sell 1.5 SOLBC shares` / `Cash out 2 SOLBC for USDC` | **Mandatory gate first**: `POST /check-min-redeem` `{ minRedeem }`. Read `isValid` (returns 200 either way) — abort on `false`. Then five-step redeem flow: (1) `/redeem/request-ticket` → ticket; (2) poll v1 `/api/v1/tx-event-management/redeem/ticket-status/:ticketId` until `isReady=true`; (3) `/redeem/execute/:ticketId` → backend fan-in (underlyings → USDC); (4) `/vaults/SOLBC/redeem-tx` → unsigned `finalizeRedeem` tx → sign + submit; (5) `/redeem-transaction` with `ticketId` → record + auto-confirm. See "Step 7: Capital Flows" for the full inline `node -e` example. |
+| `Check minimum deposit for SOLBC` / `What's the smallest deposit I can make into SOLBC` | `POST /vaults/SOLBC/check-min-deposit` with `{ minDeposit: <amount> }`. **This call is also a mandatory gate inside the deposit flow** — see "Deposit 5 USDC into SOLBC" above. Throws 400 if below threshold. Threshold = vault's underlying-asset count, or `MINI_DEPOSIT` env (default 5) if no allocations. |
+| `Check minimum redeem` / `What's the smallest redeem amount` | `POST /check-min-redeem` with `{ minRedeem: <amount> }`. **This call is also a mandatory gate inside the redeem flow** — see "Redeem 1.5 SOLBC" above. Returns `200 { isValid, message }` — read `isValid` rather than relying on HTTP status. Threshold is global (`MINI_REDEEM` env, default 4). |
 | `Generate a Solana keypair for my DFM Agent wallet` | Creates keypair, saves to file, writes env var, reports public key only |
 
 ## Troubleshooting
@@ -1460,6 +1846,17 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Every `/update-assets-tx` attempt fails policy: rule4 (asset count) + rule on per-update movement, on a vault the agent can't migrate at all** | Vault was launched with a *structurally locked* policy — typically `min_assets == max_assets` (no room to grow/shrink) and/or `max_rebalance_pct < 2 × max_asset_pct` (single-asset swaps mathematically exceed the cap). Compounding the lock-in: an included asset's volume often dips below `min_24h_volume_usd`, so any intermediate basket that still contains it fails the gate. **The agent cannot self-heal this** — the policy is fixed for the vault's life, and migration requires a platform-supported policy update. Surface the diagnosis to the user (which combination of `min_assets`/`max_assets`/`max_rebalance_pct`/floors is incompatible with the desired migration) and stop. **Do not launch new vaults with these traps**: run the "Future-proofing checklist" in Step 4a before sending `/launch-dtf`. |
 | **On-chain update succeeded but `PATCH /underlying-assets-by-mint` failed** | Do NOT re-run `/update-assets-tx` (the on-chain change already happened — re-running would double-update and likely fail re-validation). Retry the PATCH with the same body. If PATCH keeps failing, surface the on-chain signature to the user; the chain-event pipeline will eventually sync the DB. |
 | **Field-name confusion: `mintBps` vs `pct_bps`** | Phase 2 (`/update-assets-tx`) uses `mintBps` (matches on-chain instruction). Phase 3 (`/underlying-assets-by-mint`) uses `pct_bps` (matches DB schema). Same numeric values, different keys — don't copy-paste between payloads without renaming. |
+| **`/deposit-tx` returns 400 `Vault "<symbol>" has no on-chain vaultIndex`** | The vault was launched via `/launch-dtf` but the on-chain submit (or `/dtf-create`) never landed. Surface to the user — the vault is unusable for deposit/redeem until it's actually on-chain. |
+| **`/deposit-tx` returns 400 `Signed price vaultPubkey ... does not match derived vault PDA`** | KMS signer is mis-configured for this vault (operator-side issue). **Do NOT retry.** Surface to user. |
+| **`/deposit-transaction` returns 200 with `swap.failedSwapsInfo` populated** | A subset of per-asset Jupiter swaps failed and the backend already returned the USDC to the vault. The deposit is still recorded (with the successful swap signatures). Treat as success, warn the user about the failed swap count. **Never re-call** with the same signature — the deposit record already exists. |
+| **`/deposit-transaction` returns 200 with `deposit.events[].vaultDepositUpdateError`** | On-chain swap succeeded but the DB record-write threw. The chain-event pipeline will eventually reconcile. Surface to user; do not retry (the duplicate-signature guard will surface the existing record on a re-call anyway). |
+| **`/redeem/execute/:ticketId` throws** | The backend has **already auto-cancelled** the ticket — do NOT call `/redeem/cancel/:ticketId`. Surface the error to the user and end the turn. |
+| **Ticket polling exceeds 5 minutes without `isReady=true`** | Cancel via v1 `DELETE /api/v1/tx-event-management/redeem/cancel/:ticketId`, surface to user, then call `/redeem/request-ticket` fresh if they want to retry. Don't poll forever. |
+| **`/redeem-tx` returns 400 `InvalidPriceSignature` after the on-chain submit** | The KMS-signed share price baked into the tx expired between build and submit. Re-call `/redeem-tx` for a fresh price; do **NOT** submit the stale tx again. |
+| **`/redeem-transaction` returns 400 `No position found for agent in this vault`** | The agent's `UserVaultPosition` keyed on `agentProfile` doesn't exist. They must `/deposit` under the agent flow first — vaults funded outside the agent flow won't have an agent-keyed position. Surface to user. |
+| **`/redeem-transaction` returns 400 `Insufficient shares. Have X, trying to redeem Y`** | The on-chain redeem already happened but the recorded position has fewer shares than requested. Likely a previous redeem that wasn't recorded. Surface the on-chain signature to the user and stop — re-running won't help. |
+| **`/redeem-transaction` returns 200 with `ticketConfirm.ok = false`** | Auto-confirm failed but the redeem is recorded. Optionally call v1 `POST /api/v1/tx-event-management/redeem/confirm/:ticketId` manually with the same signature; queue cleanup is hygiene only and the on-chain redeem is final regardless. |
+| **`/redeem-transaction` returns 400 `redeemAgentTransaction requires performedByProfileId`** | The JWT didn't carry `agentId`. Re-run the token refresh script (`node .claude/refresh-token.js`) — the new token will populate `agentPayload.agentId` correctly. |
 | **409 "Username is already taken" on profile-launch** | The `profile-launch.js` script auto-retries up to 5 times with a random 4-char hex suffix appended to the sanitized base username. If you see this error surface to the user, the script ran out of retries — pick a more distinctive base username and re-run. |
 | **409 "An agent profile already exists for this wallet address" on profile-launch** | The wallet has already been onboarded — do **NOT** call `profile-launch` again (and the script does not retry on this 409). Use `node .claude/refresh-token.js` to issue a fresh JWT for the existing agent profile instead (the script derives the agent wallet from `DFM_AGENT_KEYPAIR`). |
 
