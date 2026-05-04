@@ -1217,8 +1217,21 @@ function call(path, method, body) {
     const req = client.request(url, { method, headers }, (res) => {
       let data = ""; res.on("data", (c) => data += c);
       res.on("end", () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data || "{}") }); }
-        catch { resolve({ status: res.statusCode, body: data }); }
+        try {
+          let parsed = JSON.parse(data || "{}");
+          // Unwrap the global ResponseMiddleware envelope: { status, message, data }.
+          // Pagination responses (which carry a top-level `pagination` field) and
+          // exception responses (statusCode + error) are NOT wrapped; pass through.
+          if (
+            parsed && typeof parsed === "object" &&
+            parsed.status && Object.prototype.hasOwnProperty.call(parsed, "data") &&
+            !Object.prototype.hasOwnProperty.call(parsed, "pagination") &&
+            !Object.prototype.hasOwnProperty.call(parsed, "error")
+          ) {
+            parsed = parsed.data;
+          }
+          resolve({ status: res.statusCode, body: parsed });
+        } catch { resolve({ status: res.statusCode, body: data }); }
       });
     });
     req.on("error", reject);
@@ -1408,8 +1421,21 @@ function call(path, method, body) {
     const req = client.request(url, { method, headers }, (res) => {
       let data = ""; res.on("data", (c) => data += c);
       res.on("end", () => {
-        try { resolve({ status: res.statusCode, body: JSON.parse(data || "{}") }); }
-        catch { resolve({ status: res.statusCode, body: data }); }
+        try {
+          let parsed = JSON.parse(data || "{}");
+          // Unwrap the global ResponseMiddleware envelope: { status, message, data }.
+          // Pagination responses (which carry a top-level `pagination` field) and
+          // exception responses (statusCode + error) are NOT wrapped; pass through.
+          if (
+            parsed && typeof parsed === "object" &&
+            parsed.status && Object.prototype.hasOwnProperty.call(parsed, "data") &&
+            !Object.prototype.hasOwnProperty.call(parsed, "pagination") &&
+            !Object.prototype.hasOwnProperty.call(parsed, "error")
+          ) {
+            parsed = parsed.data;
+          }
+          resolve({ status: res.statusCode, body: parsed });
+        } catch { resolve({ status: res.statusCode, body: data }); }
       });
     });
     req.on("error", reject);
@@ -1458,14 +1484,32 @@ function call(path, method, body) {
 
   // PHASE 4 — Execute the backend swap fan-in (await 200 response BEFORE building tx)
   // On failure here, the backend AUTO-CANCELS the ticket — do not call /cancel.
+  // Response shape (after envelope unwrap):
+  //   { vaultIndex, vaultTokenAmount, swaps: [{ mint, input, sig }],
+  //     vaultUsdcBalance, requiredUsdc, adjustedVaultTokenAmount,
+  //     sharePriceAfter, totalValueUSDCraw, totalValueUSDActual, mode,
+  //     ticketId, ticketStatus, message }
   const exec = await call("/api/v2/agent/redeem/execute/" + ticketId, "POST", { slippage: 200 });
   if (exec.status !== 200) { console.log("EXECUTE_ERROR " + exec.status + ": " + JSON.stringify(exec.body)); return; }
-  const swapSigs = (exec.body.swaps || []).map(s => s.swapSig || s.sig).filter(Boolean);
-  console.log("PHASE_4_OK swaps=" + swapSigs.length);
+  const swapSigs = (exec.body.swaps || []).map(s => s.sig).filter(Boolean);
+  console.log("PHASE_4_OK swaps=" + swapSigs.length + " sharePriceAfter=" + exec.body.sharePriceAfter);
 
   // PHASE 5 — Build the unsigned finalizeRedeem tx (await response BEFORE signing)
+  // CRITICAL: if the backend clamped the amount during fan-in (adjustedVaultTokenAmount
+  // differs from the request), the on-chain finalizeRedeem ix MUST use the clamped
+  // amount or it will mismatch the USDC actually paid out and either fail or
+  // under-redeem. The script overrides uiAmount with the clamped value when present.
+  const adjustedRaw = exec.body.adjustedVaultTokenAmount;
+  const finalizeUiAmount =
+    adjustedRaw && /^\d+$/.test(String(adjustedRaw)) && Number(adjustedRaw) > 0
+      ? Number(adjustedRaw) / 1e6
+      : uiAmount;
+  if (finalizeUiAmount !== uiAmount) {
+    console.log("ADJUSTED amount=" + uiAmount + " -> " + finalizeUiAmount + " (raw=" + adjustedRaw + ")");
+  }
+
   const build = await call("/api/v2/agent/vaults/" + symbol + "/redeem-tx", "POST", {
-    vaultTokenAmount: uiAmount
+    vaultTokenAmount: finalizeUiAmount
   });
   if (build.status !== 201) { console.log("BUILD_ERROR " + build.status + ": " + JSON.stringify(build.body)); return; }
   console.log("PHASE_5_OK vaultIndex=" + build.body.vaultIndex);
@@ -1498,7 +1542,11 @@ function call(path, method, body) {
   // PHASE_7 success the records weren't written, and the position state is
   // out of sync with the on-chain redeem.
   const ev = rec.body.events?.[0] || {};
-  const sharePriceRedeemUsd = build.body.etfSharePriceRaw
+  // Share price preference order: sharePriceAfter from PHASE_4 (post-fan-in,
+  // most accurate) -> etfSharePriceRaw from PHASE_5 build (pre-submit) -> null.
+  const sharePriceRedeemUsd = exec.body.sharePriceAfter
+    ? Number(exec.body.sharePriceAfter)
+    : build.body.etfSharePriceRaw
     ? Number(build.body.etfSharePriceRaw) / 1e6
     : null;
   console.log("REDEEM_OK " + JSON.stringify({
@@ -1515,7 +1563,9 @@ function call(path, method, body) {
     exitFeeRaw: ev.exitFee,                             // 6 decimals
     managementFeeRaw: ev.managementFee,                 // 6 decimals
     totalFeesRaw: ev.totalFees,                         // 6 decimals
-    sharePriceRedeemUsd,                                // share price baked into THIS redeem
+    sharePriceRedeemUsd,                                // post-fan-in share price (USD)
+    swapFanInUsdcRaw: exec.body.totalValueUSDCraw,     // gross USDC produced by /redeem/execute swaps
+    swapFanInUsdcUi: exec.body.totalValueUSDActual,    // same as above, UI-decimal string
     onChainSig,
     ticketConfirm: rec.body.ticketConfirm,
   }));
@@ -1529,13 +1579,14 @@ Run with `timeout: 600000` (10 minutes). The seven `PHASE_N_OK` markers print as
 
 The delta between what the user receives in USDC and what they originally deposited is **almost always fees, not market loss**. The vault collects an entry fee on deposit and an exit fee + management fee on redeem; together those bps add up to the difference. Misattributing this to "market discount", "loss from inception price", or "asset price drop" is **wrong** unless the share price has actually moved between deposit and redeem — and even then, fees are the larger driver for short holding periods.
 
-**What the agent must read from the redeem response:**
-- `events[].vaultTokensRedeemed` (raw, 6 dec) — divide by `1e6` for UI shares.
-- `events[].netStablecoinAmount` (raw, 6 dec) — net USDC paid out, **after** exit fee + management fee.
-- `events[].exitFee` (raw, 6 dec) — exit fee charged on this redeem.
-- `events[].managementFee` (raw, 6 dec) — management fee charged on this redeem.
-- `events[].totalFees` (raw, 6 dec) — convenience sum of the above two.
-- `etfSharePriceRaw` from the build-tx response (raw u64, 6 dec) — share price at time of redeem. Convert via `/ 1e6` for USD.
+**What the agent must read (already collected by the script into the `REDEEM_OK` payload):**
+- `sharesRedeemedRaw` (raw, 6 dec) — divide by `1e6` for UI shares. Sourced from `events[].vaultTokensRedeemed`.
+- `netUsdcRaw` (raw, 6 dec) — net USDC paid out, **after** exit fee + management fee. Sourced from `events[].netStablecoinAmount`.
+- `exitFeeRaw` (raw, 6 dec) — exit fee charged on this redeem.
+- `managementFeeRaw` (raw, 6 dec) — management fee charged on this redeem.
+- `totalFeesRaw` (raw, 6 dec) — convenience sum of the above two.
+- `sharePriceRedeemUsd` — settled share price in USD. The script prefers `sharePriceAfter` from PHASE 4 (post-fan-in, most accurate) over the price baked into the unsigned tx in PHASE 5.
+- `swapFanInUsdcUi` — the UI-decimal USDC produced by the backend swap fan-in (PHASE 4's `totalValueUSDActual`). Use to corroborate the `netUsdcRaw / 1e6` value the user actually receives — the small gap between the two is exit fee + management fee.
 
 **Required JSON the script outputs has all of this — use it directly. Do NOT compute the user-facing summary from `netStablecoinAmount` alone.**
 
