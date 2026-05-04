@@ -1160,17 +1160,38 @@ When the user says **"deposit USDC into SOLBC"**, **"buy SOLBC shares"**, **"red
 
 The reason the gates are mandatory: skipping them lets through too-small amounts that produce confusing on-chain failures (post-fee dust, zero-share mints, and — for redeem — fractional swaps Jupiter rejects). Catching the issue at the validator endpoint gives the user a clean, actionable error before any on-chain or queue interaction.
 
+**Phase ordering contract (READ FIRST — the most-violated invariant in this skill):**
+
+Every phase of both flows is **strictly sequential**. The agent MUST `await` the previous phase's API response (and verify its status) before issuing the next phase's call. The scripts below are written as a single async chain so this is automatic — but if the agent ever runs phases as separate `node -e` invocations, or runs anything in parallel, the flow will silently corrupt:
+
+| Risk | What goes wrong |
+|---|---|
+| Skipping `/deposit-transaction` after the on-chain submit confirms | The deposit tx lands on-chain (shares are minted to the depositor) **but no `UserVaultPosition` is recorded under `agentProfile`**. The user can't redeem via the agent flow later because `/redeem-transaction` will throw `No position found for agent in this vault`. |
+| Reporting deposit success to the user before `/deposit-transaction` returns 200 | Same as above — the on-chain side is done, the DB side isn't. The user thinks they're holding shares; the agent's later P&L breakdown can't see the deposit. |
+| Calling `/redeem/execute/:ticketId` before `isReady=true` | Backend rejects with `Failed to process ticket` and **auto-cancels the ticket** — the user has to start the whole redeem flow over. |
+| Building `/redeem-tx` before `/redeem/execute` finishes the swap fan-in | The vault doesn't have enough USDC to settle, so `finalizeRedeem` fails on-chain. The signed price expires; the agent must re-call `/redeem-tx` for a fresh price. |
+| Calling `/redeem-transaction` before the on-chain `finalizeRedeem` confirms | Backend can't fetch the tx (`Transaction not found`); the redeem is on-chain but no DB records exist. Re-call after `confirmTransaction` resolves. |
+
+**The success indicator is the final `*_OK` JSON line printed by each script** (`DEPOSIT_OK { ... }` or `REDEEM_OK { ... }`). Any earlier `PHASE_N_OK` log is intermediate progress only — **do not surface success to the user until you see the final OK line on stdout**. If the script exits without the final OK line (or with `MIN_*_FAIL`, `BUILD_ERROR`, `EXECUTE_ERROR`, `RECORD_ERROR`, `FATAL`), surface the documented failure-message template and stop.
+
 #### 7a. Deposit Flow (2 sub-steps after pre-flight)
 
 **Step 7a-0 — Mandatory pre-flight: `/check-min-deposit`**
 
-Always call `POST {DFM_API_URL}/api/v2/agent/vaults/:symbol/check-min-deposit` with `{ minDeposit: <UI USDC> }` **before** building the deposit tx. On `400`, do **not** proceed — surface the threshold message to the user and ask for a larger amount. The script in Step 7a-1 below runs this check internally and aborts on failure.
+Always call `POST {DFM_API_URL}/api/v2/agent/vaults/:symbol/check-min-deposit` with `{ minDeposit: <UI USDC> }` **before** building the deposit tx. On `400`, do **not** proceed — surface the threshold message to the user and ask for a larger amount. The consolidated script in Step 7a-1 below runs this check internally and aborts on failure.
 
-**Step 7a-1 — Gate, build the unsigned deposit tx, sign, submit**
+**Step 7a-1 — End-to-end deposit (single script, four sequential phases)**
 
-The combined script below: (1) gates on `/check-min-deposit`, (2) calls `/vaults/:symbol/deposit-tx` with `{ userPublicKey, depositAmount }` (UI USDC), (3) signs locally with `DFM_AGENT_KEYPAIR`, (4) submits on-chain. The backend resolves the vault by symbol, derives PDAs, fetches a fresh KMS-signed share price, conditionally adds 4 ATA-creation ixs (depositor USDC + vault-token, fee-recipient USDC, admin USDC), and emits the Ed25519 verify ix + `deposit(...)` ix.
+The script below runs **all four deposit phases in one async chain** — each phase awaits the previous phase's API response before starting:
 
-Returns: `{ transaction, vaultIndex, vaultPda, vaultMintPda, etfSharePriceRaw, priceTimestamp, amountInRaw }` — the latter four must be forwarded **unchanged** into Step 7a-2.
+| Phase | Action | Indicator on stdout |
+|---|---|---|
+| 1 | `POST /vaults/:symbol/check-min-deposit` (mandatory gate) | `PHASE_1_OK gate=passed` |
+| 2 | `POST /vaults/:symbol/deposit-tx` (build unsigned tx) | `PHASE_2_OK vaultIndex=<n>` |
+| 3 | Sign locally with `DFM_AGENT_KEYPAIR` + `sendRawTransaction` + `confirmTransaction` | `PHASE_3_OK onChainSig=<sig>` |
+| 4 | `POST /deposit-transaction` (swap fan-out + DB record persist) | `DEPOSIT_OK { … }` (final success — JSON line) |
+
+**Do not run these phases as separate `node -e` invocations** — keep the chain inside a single script so the agent can't accidentally proceed before a phase resolves. **Do not surface success to the user** until the final `DEPOSIT_OK { … }` JSON line appears on stdout. A `PHASE_3_OK` (on-chain confirmed) **is not enough** — without `DEPOSIT_OK`, the `UserVaultPosition` keyed on `agentProfile` was never written, and the user's later redeem will fail with `No position found for agent in this vault`.
 
 ```bash
 node -e '
@@ -1178,9 +1199,10 @@ const http = require("http");
 const https = require("https");
 const { Keypair, VersionedTransaction, Connection } = require("@solana/web3.js");
 const bs58 = require("bs58").default || require("bs58");
+
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR));
-const symbol = process.argv[1];           // e.g. ALPHA
-const depositAmount = Number(process.argv[2]); // UI USDC, e.g. 5
+const symbol = process.argv[1];                 // e.g. ALPHA
+const depositAmount = Number(process.argv[2]);  // UI USDC, e.g. 5
 
 function call(path, method, body) {
   return new Promise((resolve, reject) => {
@@ -1206,115 +1228,86 @@ function call(path, method, body) {
 }
 
 (async () => {
-  // 7a-0 — MANDATORY GATE: /check-min-deposit (throws 400 on fail)
-  const gate = await call("/api/v2/agent/vaults/" + symbol + "/check-min-deposit", "POST", { minDeposit: depositAmount });
+  // PHASE 1 — Mandatory gate
+  const gate = await call(
+    "/api/v2/agent/vaults/" + symbol + "/check-min-deposit",
+    "POST",
+    { minDeposit: depositAmount }
+  );
   if (gate.status !== 200) {
     console.log("MIN_DEPOSIT_FAIL " + gate.status + ": " + (gate.body?.message || JSON.stringify(gate.body)));
     return;
   }
+  console.log("PHASE_1_OK gate=passed");
 
-  // 7a-1a — Build the unsigned deposit tx
-  const build = await call("/api/v2/agent/vaults/" + symbol + "/deposit-tx", "POST", {
-    userPublicKey: keypair.publicKey.toBase58(),  // agent wallet as depositor (default)
-    depositAmount
-  });
+  // PHASE 2 — Build the unsigned deposit tx (await response BEFORE signing)
+  const build = await call(
+    "/api/v2/agent/vaults/" + symbol + "/deposit-tx",
+    "POST",
+    {
+      userPublicKey: keypair.publicKey.toBase58(), // agent wallet as depositor (default)
+      depositAmount,
+    }
+  );
   if (build.status !== 201) {
     console.log("BUILD_ERROR " + build.status + ": " + JSON.stringify(build.body));
     return;
   }
+  console.log("PHASE_2_OK vaultIndex=" + build.body.vaultIndex);
 
-  // 7a-1b — Sign + submit on-chain
+  // PHASE 3 — Sign locally + submit on-chain (await CONFIRMATION before recording)
   const conn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
   const tx = VersionedTransaction.deserialize(Buffer.from(build.body.transaction, "base64"));
   tx.sign([keypair]);
-  const sig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
-  await conn.confirmTransaction(sig, "confirmed");
+  const onChainSig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
+  await conn.confirmTransaction(onChainSig, "confirmed");
+  console.log("PHASE_3_OK onChainSig=" + onChainSig);
 
-  console.log(JSON.stringify({
-    onChainSig: sig,
+  // PHASE 4 — Record (await /deposit-transaction response before declaring success)
+  // Backend runs two server-side sub-operations:
+  //   (a) agentSwap — vault USDC -> underlyings via Jupiter
+  //   (b) depositTransaction — parses VaultDeposited logs, writes
+  //       DepositTransaction + UserVaultPosition (keyed on agentProfile) +
+  //       DepositRecord + History
+  // Failure modes are surfaced INSIDE the 200 response (swap.failedSwapsInfo,
+  // deposit.events[].vaultDepositUpdateError) — neither aborts the flow.
+  const rec = await call("/api/v2/agent/deposit-transaction", "POST", {
+    transactionSignature: onChainSig,
     vaultIndex: build.body.vaultIndex,
     etfSharePriceRaw: build.body.etfSharePriceRaw,
     amountInRaw: build.body.amountInRaw,
-    priceTimestamp: build.body.priceTimestamp
+    slippage: 200,
+  });
+  if (rec.status !== 200) {
+    console.log("RECORD_ERROR " + rec.status + ": " + JSON.stringify(rec.body));
+    return;
+  }
+
+  // FINAL — emit consolidated JSON for the user-facing summary + memory.
+  // Agent must wait for THIS line before reporting deposit success.
+  const ev = rec.body.deposit?.events?.[0] || {};
+  const sharePriceDepositUsd = build.body.etfSharePriceRaw
+    ? Number(build.body.etfSharePriceRaw) / 1e6
+    : null;
+  console.log("DEPOSIT_OK " + JSON.stringify({
+    event: ev.eventType,
+    vaultName: ev.vaultName,
+    vaultSymbol: ev.vaultSymbol,
+    grossUsdcRaw: ev.amount,                          // 6 decimals
+    entryFeeRaw: ev.entryFee,                         // 6 decimals
+    managementFeeRaw: ev.managementFee,               // 6 decimals (typically 0 at deposit)
+    netUsdcRaw: ev.netAmount,                         // amount that actually became shares
+    sharesMintedRaw: ev.vaultTokensMinted,            // 6 decimals
+    sharePriceDepositUsd,                             // share price baked into THIS deposit
+    onChainSig,
+    failedSwaps: rec.body.swap?.failedSwapsInfo || null,
+    recordError: ev.vaultDepositUpdateError || null,
   }));
 })().catch(e => console.log("FATAL " + (e?.message || String(e))));
 ' <vaultSymbol> <depositAmount>
 ```
 
-Run with `timeout: 600000` (10 minutes). On `MIN_DEPOSIT_FAIL`, surface the message to the user verbatim and stop — do **not** retry without a larger `depositAmount`. On success, stash the printed `{ onChainSig, vaultIndex, etfSharePriceRaw, amountInRaw }` for Step 7a-2.
-
-**Step 7a-2 — Record the deposit (swap fan-out + persist)**
-
-`POST {DFM_API_URL}/api/v2/agent/deposit-transaction` with `{ transactionSignature: onChainSig, vaultIndex, etfSharePriceRaw, amountInRaw, slippage? }`. The agent's identity is read from the JWT.
-
-Backend runs two sub-operations in one call:
-1. **`agentSwap`** — fans the vault's USDC into its underlying assets via Jupiter using the same `vaultIndex` / `amountInRaw` / `etfSharePriceRaw`.
-2. **`depositTransaction`** — parses VaultDeposited logs, persists `DepositTransaction` + `UserVaultPosition` (keyed on `agentProfile`) + `DepositRecord` + History row, forwards the swap signatures as `signatureArray`.
-
-Failure modes are surfaced **inside the 200**: `swap.failedSwapsInfo` (per-asset swap failures + return-tx) and `deposit.events[].vaultDepositUpdateError` (record write threw). The flow does **not** abort on either — surface a warning to the user but treat the deposit as recorded.
-
-```bash
-node -e '
-const http = require("http");
-const https = require("https");
-const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/deposit-transaction");
-const client = url.protocol === "https:" ? https : http;
-
-// Pass the four fields from Step 7a-1 as JSON in argv[1]
-const inputs = JSON.parse(process.argv[1]);
-const payload = JSON.stringify({
-  transactionSignature: inputs.onChainSig,
-  vaultIndex: inputs.vaultIndex,
-  etfSharePriceRaw: inputs.etfSharePriceRaw,
-  amountInRaw: inputs.amountInRaw,
-  slippage: 200
-});
-
-const req = client.request(url, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "Content-Length": Buffer.byteLength(payload),
-    "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN
-  }
-}, (res) => {
-  let data = ""; res.on("data", (c) => data += c);
-  res.on("end", () => {
-    const json = JSON.parse(data);
-    if (res.statusCode !== 200) {
-      console.log("RECORD_ERROR " + res.statusCode + ": " + data);
-      return;
-    }
-    const failedSwaps = json.swap?.failedSwapsInfo;
-    const ev = json.deposit?.events?.[0] || {};
-    const recordError = ev.vaultDepositUpdateError;
-    const sharePriceDepositUsd = inputs.etfSharePriceRaw
-      ? Number(inputs.etfSharePriceRaw) / 1e6
-      : null;
-    // Print every field needed to format the deposit summary AND to be
-    // remembered for the eventual redeem (so the agent can compute a real
-    // P&L breakdown later instead of guessing "market loss").
-    console.log(JSON.stringify({
-      event: ev.eventType,
-      vaultName: ev.vaultName,
-      vaultSymbol: ev.vaultSymbol,
-      grossUsdcRaw: ev.amount,                          // 6 decimals
-      entryFeeRaw: ev.entryFee,                         // 6 decimals
-      managementFeeRaw: ev.managementFee,               // 6 decimals (typically 0 at deposit)
-      netUsdcRaw: ev.netAmount,                         // amount that actually became shares
-      sharesMintedRaw: ev.vaultTokensMinted,            // 6 decimals
-      sharePriceDepositUsd,                             // share price baked into THIS deposit
-      onChainSig: inputs.onChainSig,
-      failedSwaps: failedSwaps || null,
-      recordError: recordError || null,
-    }));
-  });
-});
-req.on("error", (e) => console.log("ERROR: " + e.message));
-req.write(payload);
-req.end();
-' "$STEP_7A1_OUTPUT"  # JSON string from Step 7a-1
-```
+Run with `timeout: 600000` (10 minutes). The four `*_OK` markers print as each phase resolves; the agent should follow them but report success **only when `DEPOSIT_OK { … }` appears**. On any other terminal line (`MIN_DEPOSIT_FAIL`, `BUILD_ERROR`, `RECORD_ERROR`, `FATAL`), surface the documented failure-message template and stop.
 
 #### Deposit completion messaging — MANDATORY format
 
@@ -1374,9 +1367,22 @@ Sign the returned tx with `DFM_AGENT_KEYPAIR`, submit on-chain, then call `POST 
 
 Including `ticketId` triggers the backend to **auto-confirm** the redeem queue ticket after the record is persisted. The auto-confirm is **non-fatal** — failure surfaces on the response as `ticketConfirm: { ok: false, message }` but does not abort. The redeem is already on-chain and DB-recorded.
 
+**End-to-end redeem (single script, seven sequential phases).** Each phase awaits its API response before the next:
+
+| Phase | Action | Indicator on stdout |
+|---|---|---|
+| 1 | `POST /check-min-redeem` (mandatory gate; **read `isValid`**, not status) | `PHASE_1_OK gate=passed` |
+| 2 | `POST /redeem/request-ticket` (queue entry) | `PHASE_2_OK ticketId=<id> ready=<bool>` |
+| 3 | Poll v1 `GET /redeem/ticket-status/:ticketId` until `isReady=true` (max 5 min) | `PHASE_3_OK ticket=ready` |
+| 4 | `POST /redeem/execute/:ticketId` (backend swap fan-in) | `PHASE_4_OK swaps=<n>` |
+| 5 | `POST /vaults/:symbol/redeem-tx` (build unsigned `finalizeRedeem`) | `PHASE_5_OK vaultIndex=<n>` |
+| 6 | Sign locally with `DFM_AGENT_KEYPAIR` + `sendRawTransaction` + `confirmTransaction` | `PHASE_6_OK onChainSig=<sig>` |
+| 7 | `POST /redeem-transaction` (record + auto-confirm ticket) | `REDEEM_OK { … }` (final success — JSON line) |
+
+**Do not surface success to the user** until the final `REDEEM_OK { … }` line appears on stdout. `PHASE_6_OK` (on-chain confirmed) **is not enough** — without `REDEEM_OK`, the position state is out of sync with the on-chain redeem and the History row was never written.
+
 ```bash
-# End-to-end redeem (Steps 7b-1 through 7b-5) as one node script.
-# Splits into stages internally; each stage logs its own progress.
+# End-to-end redeem — single script, seven sequential phases.
 node -e '
 const http = require("http");
 const https = require("https");
@@ -1415,24 +1421,28 @@ function call(path, method, body) {
 (async () => {
   const rawAmount = String(Math.round(uiAmount * 1e6));
 
-  // 7b-0 — MANDATORY GATE: /check-min-redeem (returns 200 with isValid; do NOT trust HTTP status alone)
+  // PHASE 1 — Mandatory gate: /check-min-redeem
+  // Returns 200 with isValid; do NOT trust HTTP status alone — read the boolean.
   const gate = await call("/api/v2/agent/check-min-redeem", "POST", { minRedeem: uiAmount });
   if (gate.status !== 200 || gate.body?.isValid !== true) {
     console.log("MIN_REDEEM_FAIL: " + (gate.body?.message || JSON.stringify(gate.body)));
     return;
   }
+  console.log("PHASE_1_OK gate=passed");
 
-  // 7b-1 — request ticket
+  // PHASE 2 — Request a redeem ticket (await response BEFORE polling)
   const ticket = await call("/api/v2/agent/redeem/request-ticket", "POST", {
     vaultSymbol: symbol,
     vaultTokenAmount: rawAmount,
     slippage: 200
   });
-  if (ticket.status !== 200) { console.log("TICKET_ERROR", ticket); return; }
+  if (ticket.status !== 200) { console.log("TICKET_ERROR " + ticket.status + ": " + JSON.stringify(ticket.body)); return; }
   const { ticketId } = ticket.body;
-  console.log("TICKET", ticketId, "ready=" + ticket.body.isReady);
+  console.log("PHASE_2_OK ticketId=" + ticketId + " ready=" + ticket.body.isReady);
 
-  // 7b-2 — poll v1 ticket-status until ready (max 5 minutes)
+  // PHASE 3 — Poll v1 ticket-status until ready (max 5 minutes)
+  // Each poll awaits the response before sleeping for the next attempt.
+  // Do NOT call /redeem/execute until isReady=true.
   const start = Date.now();
   while (Date.now() - start < 5 * 60 * 1000) {
     if (ticket.body.isReady) break;
@@ -1440,32 +1450,38 @@ function call(path, method, body) {
     const s = await call("/api/v1/tx-event-management/redeem/ticket-status/" + ticketId, "GET");
     if (s.body?.isReady) { ticket.body.isReady = true; break; }
     if (["EXPIRED", "CANCELLED", "COMPLETED"].includes(s.body?.status)) {
-      console.log("TICKET_TERMINAL", s.body.status); return;
+      console.log("TICKET_TERMINAL status=" + s.body.status); return;
     }
   }
   if (!ticket.body.isReady) { console.log("TICKET_TIMEOUT"); return; }
+  console.log("PHASE_3_OK ticket=ready");
 
-  // 7b-3 — execute (backend swap fan-in)
+  // PHASE 4 — Execute the backend swap fan-in (await 200 response BEFORE building tx)
+  // On failure here, the backend AUTO-CANCELS the ticket — do not call /cancel.
   const exec = await call("/api/v2/agent/redeem/execute/" + ticketId, "POST", { slippage: 200 });
-  if (exec.status !== 200) { console.log("EXECUTE_ERROR", exec); return; }
+  if (exec.status !== 200) { console.log("EXECUTE_ERROR " + exec.status + ": " + JSON.stringify(exec.body)); return; }
   const swapSigs = (exec.body.swaps || []).map(s => s.swapSig || s.sig).filter(Boolean);
-  console.log("EXECUTE_OK swaps=" + swapSigs.length);
+  console.log("PHASE_4_OK swaps=" + swapSigs.length);
 
-  // 7b-4 — build unsigned finalizeRedeem tx
+  // PHASE 5 — Build the unsigned finalizeRedeem tx (await response BEFORE signing)
   const build = await call("/api/v2/agent/vaults/" + symbol + "/redeem-tx", "POST", {
     vaultTokenAmount: uiAmount
   });
-  if (build.status !== 201) { console.log("BUILD_ERROR", build); return; }
+  if (build.status !== 201) { console.log("BUILD_ERROR " + build.status + ": " + JSON.stringify(build.body)); return; }
+  console.log("PHASE_5_OK vaultIndex=" + build.body.vaultIndex);
 
-  // Sign + submit on-chain
+  // PHASE 6 — Sign + submit on-chain (await CONFIRMATION before recording)
   const conn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
   const tx = VersionedTransaction.deserialize(Buffer.from(build.body.transaction, "base64"));
   tx.sign([keypair]);
   const onChainSig = await conn.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
   await conn.confirmTransaction(onChainSig, "confirmed");
-  console.log("ONCHAIN_OK", onChainSig);
+  console.log("PHASE_6_OK onChainSig=" + onChainSig);
 
-  // 7b-5 — record + auto-confirm ticket
+  // PHASE 7 — Record + auto-confirm ticket (await /redeem-transaction response)
+  // Including ticketId triggers the backend to confirmRedeemTicket after the
+  // record is persisted. Failure of the confirm step is non-fatal and surfaces
+  // on the response as ticketConfirm.ok=false.
   const rec = await call("/api/v2/agent/redeem-transaction", "POST", {
     transactionSignature: onChainSig,
     vaultIndex: build.body.vaultIndex,
@@ -1474,17 +1490,18 @@ function call(path, method, body) {
     slippage: 200,
     ticketId
   });
-  if (rec.status !== 200) { console.log("RECORD_ERROR", rec); return; }
+  if (rec.status !== 200) { console.log("RECORD_ERROR " + rec.status + ": " + JSON.stringify(rec.body)); return; }
 
-  // Surface every field needed to format the redeem summary correctly.
-  // The agent MUST use these to break down the delta as fees (not market loss)
-  // unless sharePrice actually moved between deposit and redeem — see the
-  // "Redeem completion messaging" section below the script.
+  // FINAL — emit REDEEM_OK { ... } only after /redeem-transaction returns 200.
+  // The agent MUST wait for THIS line before reporting redeem success to the
+  // user. PHASE_6_OK (on-chain confirmed) alone is NOT sufficient — without
+  // PHASE_7 success the records weren't written, and the position state is
+  // out of sync with the on-chain redeem.
   const ev = rec.body.events?.[0] || {};
   const sharePriceRedeemUsd = build.body.etfSharePriceRaw
     ? Number(build.body.etfSharePriceRaw) / 1e6
     : null;
-  console.log(JSON.stringify({
+  console.log("REDEEM_OK " + JSON.stringify({
     event: ev.eventType,
     vaultName: ev.vaultName,
     vaultSymbol: ev.vaultSymbol,
@@ -1502,11 +1519,11 @@ function call(path, method, body) {
     onChainSig,
     ticketConfirm: rec.body.ticketConfirm,
   }));
-})().catch(e => console.log("FATAL", e?.message || String(e)));
+})().catch(e => console.log("FATAL " + (e?.message || String(e))));
 ' <vaultSymbol> <uiAmount>
 ```
 
-Run with `timeout: 600000` (10 minutes). The script prints a single JSON line with every field needed to format the user-facing summary correctly — see "Redeem completion messaging" below.
+Run with `timeout: 600000` (10 minutes). The seven `PHASE_N_OK` markers print as each phase resolves; report success **only when `REDEEM_OK { … }` appears**. On any other terminal line (`MIN_REDEEM_FAIL`, `TICKET_ERROR`, `TICKET_TERMINAL`, `TICKET_TIMEOUT`, `EXECUTE_ERROR`, `BUILD_ERROR`, `RECORD_ERROR`, `FATAL`), surface the documented failure-message template and stop. The fields needed for the user-facing summary are described in "Redeem completion messaging" below.
 
 #### Redeem completion messaging — MANDATORY format
 
@@ -1565,6 +1582,8 @@ Not:
 
 | Symptom | What to do |
 |---|---|
+| Script ends without `DEPOSIT_OK { … }` (deposit) | The deposit was **not** fully completed — even if `PHASE_3_OK` (on-chain confirmed) was logged, the DB records (`DepositTransaction`, `UserVaultPosition`, `DepositRecord`, History) were not written. Do NOT report deposit success to the user. The chain-event pipeline may eventually reconcile, but for the agent's purposes the deposit is "in flight". Surface the last error line to the user and stop. |
+| Script ends without `REDEEM_OK { … }` (redeem) | The redeem was **not** fully completed. If `PHASE_6_OK` was logged but `PHASE_7` failed, the on-chain `finalizeRedeem` already happened (USDC paid out to the agent wallet) but no `RedeemTransaction` / `UserVaultPosition` decrement / `RedeemRecord` / History was written, and the queue ticket was not auto-confirmed. Do NOT report redeem success. Surface the last error line and stop; the operator can manually re-call `/redeem-transaction` with the same `transactionSignature` (the duplicate-signature guard makes that idempotent). |
 | `/check-min-deposit` returns `400 Minimum deposit should be at least $<n> USDC` | **Hard gate — do NOT proceed to `/deposit-tx`.** Surface the threshold verbatim to the user, ask them for a larger amount, then re-run the gate. The gate must pass before any further deposit calls. |
 | `/check-min-redeem` returns `200 { isValid: false, ... }` | **Hard gate — do NOT proceed to `/redeem/request-ticket`.** Surface `message` to the user, ask for a larger amount, then re-run the gate. Note: the endpoint returns HTTP 200 even on fail — read `isValid`, not the status code. |
 | `/deposit-tx` returns `400 Vault "<symbol>" has no on-chain vaultIndex` | The vault hasn't been created on-chain yet — `/launch-dtf` was called but `/dtf-create` (and the on-chain submit between them) never landed. Surface to the user. |
@@ -1743,6 +1762,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Don't send USDC in launch payloads.** Never include `USDC` / `USD Coin` in `underlyingAssets`.
 - **Don't send secret keys to the backend.** Only public keys are sent. Signing happens locally.
 - **Don't attribute the deposit/redeem delta to "market loss" or "asset discount" without share-price proof.** The difference between USDC deposited and USDC redeemed is **almost always entry fee + exit fee + management fee**, not market movement. Read `events[].exitFee` and `events[].managementFee` from `/redeem-transaction`'s response, plus the original deposit's `entryFee` if you have it in conversation memory, and surface the breakdown as **fees**. Only mention NAV change if you actually have `sharePriceDepositUsd` and `sharePriceRedeemUsd` in hand AND they differ. Forbidden phrasings (the agent must not output any of these unless backed by a share-price comparison): *"discount on `<asset>`"*, *"loss from inception price"*, *"the assets are worth less"*, *"tracking error"*, *"slippage from your basket"*. See "Step 7 → Redeem completion messaging" for the exact template.
+- **Don't surface deposit/redeem success before the final OK line.** Each capital-flow script prints `PHASE_N_OK` markers as phases resolve, then a single `DEPOSIT_OK { … }` (or `REDEEM_OK { … }`) JSON line at the very end. Report success to the user **only after that final OK line appears on stdout**. Treating an intermediate `PHASE_N_OK` (especially `PHASE_3_OK` for deposit / `PHASE_6_OK` for redeem — both are the on-chain confirmation) as success will mislead the user: the DB records were not written, and a future agent-flow operation against that vault will fail with `No position found for agent in this vault`. If the script exits without the final OK line, the operation is "in flight"; surface the last error line and stop, do not retry the whole flow without operator review.
 
 ## Setup Guide
 
