@@ -1523,6 +1523,62 @@ Records an agent redeem after the client has signed and submitted the on-chain `
 
 ---
 
+## 15i. GET `/vaults/:symbol/shares` - Get Vault Share Balance (on-chain read) [Authenticated]
+
+Reads an agent wallet's vault-token (share) balance directly from on-chain. **No DB read** — every value comes from the Solana RPC. Useful as a sanity check before a redeem ("how many shares do I actually hold?") and for portfolio displays that need live data rather than the agent's cached `UserVaultPosition`.
+
+**Wallet resolution:** the wallet is canonically read from the JWT (`agentPayload.agentWalletAddress`). The optional `?wallet=<pubkey>` query param is accepted only as a fallback — pass it explicitly when the agent wants to inspect a different wallet's balance.
+
+**Path Params:** `symbol` — vault symbol (case-insensitive).
+
+**Query Params:**
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `wallet` | string | No | Base58 Solana public key. Defaults to the agent wallet from the JWT. |
+
+**Example:**
+```
+# Default — reads the agent's own balance from JWT
+GET /api/v2/agent/vaults/POP-DTF/shares
+Authorization: Bearer <token>
+
+# Explicit — read a different wallet's balance
+GET /api/v2/agent/vaults/POP-DTF/shares?wallet=5HvUiPYGJ9wshjzDHSb1tYASmF1eomFeYo3zCjMPA7B8
+Authorization: Bearer <token>
+```
+
+**Response (200):** wrapped in the global `{ status, message, data }` envelope. The inner `data`:
+
+```json
+{
+  "vaultSymbol": "POP-DTF",
+  "vaultIndex": 68,
+  "vaultMintPda": "...",
+  "wallet": "5HvUiPYGJ9wshjzDHSb1tYASmF1eomFeYo3zCjMPA7B8",
+  "ata": "...",
+  "sharesRaw": "2543171",
+  "sharesUi": "2.543171",
+  "exists": true,
+  "decimals": 6
+}
+```
+
+| Field (under `data`) | Description |
+|-------|-------------|
+| `vaultIndex` | u32 — on-chain vault index resolved from the symbol. |
+| `vaultMintPda` | Vault-mint PDA. The SPL token mint that represents the vault's shares. |
+| `wallet` | The wallet whose balance was read (JWT-resolved or `?wallet=` query). |
+| `ata` | The wallet's associated token account address for the vault mint. |
+| `sharesRaw` | Raw u64 share balance as a string (6 decimals). `"0"` when `exists: false`. |
+| `sharesUi` | `sharesRaw` converted to UI units, formatted to `decimals` decimal places. |
+| `exists` | `true` when the ATA has been created (balance may be 0 or positive). `false` when the ATA does not exist — normal for wallets that have never deposited into this vault. |
+| `decimals` | Vault-token decimals. `6` for all DFM vaults today. |
+
+**Errors:** `400` Invalid wallet base58 / vault has no `vaultIndex` / no agent wallet available | `401` Invalid or missing JWT | `404` Vault not found.
+
+---
+
 ## Architecture
 
 ```

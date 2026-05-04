@@ -430,6 +430,7 @@ Use this skill when:
 - The user wants to check vault state, policy, or rebalancing status
 - The user asks to rebalance a vault or distribute fees
 - The user asks to **deposit USDC into a vault** or **redeem vault tokens** (capital flows are agent-bound — see "Step 7: Capital Flows")
+- The user asks **"how many shares do I hold in `<vault>`?"** or **"what's my position in `<vault>`?"** — read the on-chain ATA balance via `GET /vaults/:symbol/shares`. Also the right pre-flight call when the user says *"redeem all my `<vault>`"*.
 - The user needs to set up agent auth (wallet generation, token management)
 
 ## Autonomous DTF Launch -- How It Works
@@ -1173,6 +1174,49 @@ Every phase of both flows is **strictly sequential**. The agent MUST `await` the
 | Calling `/redeem-transaction` before the on-chain `finalizeRedeem` confirms | Backend can't fetch the tx (`Transaction not found`); the redeem is on-chain but no DB records exist. Re-call after `confirmTransaction` resolves. |
 
 **The success indicator is the final `*_OK` JSON line printed by each script** (`DEPOSIT_OK { ... }` or `REDEEM_OK { ... }`). Any earlier `PHASE_N_OK` log is intermediate progress only — **do not surface success to the user until you see the final OK line on stdout**. If the script exits without the final OK line (or with `MIN_*_FAIL`, `BUILD_ERROR`, `EXECUTE_ERROR`, `RECORD_ERROR`, `FATAL`), surface the documented failure-message template and stop.
+
+#### Utility: read on-chain share balance
+
+For "how many `<vault>` shares do I hold?" / "what's my position?" / pre-flight before *"redeem all my `<vault>`"*, call `GET /vaults/:symbol/shares`. The wallet is read from the JWT — **do not pass `?wallet=`** unless the user explicitly asks about a different wallet. The endpoint returns the on-chain ATA balance (no DB read).
+
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+const url = new URL(process.env.DFM_API_URL + "/api/v2/agent/vaults/" + process.argv[1] + "/shares");
+const client = url.protocol === "https:" ? https : http;
+const req = client.get(url, {
+  headers: { "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN }
+}, (res) => {
+  let data = ""; res.on("data", (c) => data += c);
+  res.on("end", () => {
+    let parsed = JSON.parse(data || "{}");
+    // Unwrap the global ResponseMiddleware envelope
+    if (parsed && parsed.status && parsed.data) parsed = parsed.data;
+    if (res.statusCode !== 200) {
+      console.log("BALANCE_ERROR " + res.statusCode + ": " + JSON.stringify(parsed));
+      return;
+    }
+    if (!parsed.exists) {
+      console.log("BALANCE_OK exists=false sharesUi=0 — wallet has never held shares for this vault");
+      return;
+    }
+    console.log("BALANCE_OK " + JSON.stringify({
+      vaultSymbol: parsed.vaultSymbol,
+      sharesRaw: parsed.sharesRaw,
+      sharesUi: parsed.sharesUi,
+      ata: parsed.ata,
+    }));
+  });
+});
+req.on("error", (e) => console.log("ERROR: " + e.message));
+' <vaultSymbol>
+```
+
+**Use cases:**
+- *"How many SOLBC shares do I hold?"* — call once, surface `sharesUi` and `vaultSymbol`. If `exists: false`, say *"You don't currently hold any SOLBC shares."*
+- *"Redeem all my SOLBC"* — call this first to read `sharesUi`, then pass that exact number as `vaultTokenAmount` into the redeem flow's `/redeem/request-ticket`. Do **not** read from the agent's cached `UserVaultPosition` — that's the DB record and may lag behind on-chain reality (e.g. if a previous redeem wasn't recorded properly). The on-chain ATA is the source of truth.
+- Quick sanity check before any redeem — surface `sharesUi` to the user and confirm before proceeding.
 
 #### 7a. Deposit Flow (2 sub-steps after pre-flight)
 
@@ -1971,6 +2015,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **Execute redeem ticket** | `POST` | `/redeem/execute/:ticketId` | JWT | optional `slippage` (vault/amount/price baked into the ticket) |
 | **Build redeem tx (finalize)** | `POST` | `/vaults/:symbol/redeem-tx` | JWT | `vaultTokenAmount` (UI tokens) + optional `agentWallet` (JWT canonical) |
 | **Record redeem + auto-confirm ticket** | `POST` | `/redeem-transaction` | JWT | `transactionSignature` + optional `vaultIndex`/`etfSharePriceRaw`/`signatureArray`/`slippage`/`ticketId` (ticketId triggers auto-confirm) |
+| **Get vault share balance (on-chain read)** | `GET` | `/vaults/:symbol/shares` (optional `?wallet=<pubkey>`) | JWT | wallet defaults to JWT's agent wallet; pass `?wallet=` only to inspect a different wallet |
 | Revoke token | `POST` | `/token/revoke` | JWT | - |
 | Refresh token (by profileId) | `POST` | `/token/refresh` | No | `profileId` |
 | Refresh token (by agent wallet) | `POST` | `/token/refresh-by-wallet` | No | `agentWalletAddress` |
@@ -2008,6 +2053,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Redeem 1.5 SOLBC` / `Sell 1.5 SOLBC shares` / `Cash out 2 SOLBC for USDC` | **Mandatory gate first**: `POST /check-min-redeem` `{ minRedeem }`. Read `isValid` (returns 200 either way) — abort on `false`. Then five-step redeem flow: (1) `/redeem/request-ticket` → ticket; (2) poll v1 `/api/v1/tx-event-management/redeem/ticket-status/:ticketId` until `isReady=true`; (3) `/redeem/execute/:ticketId` → backend fan-in (underlyings → USDC); (4) `/vaults/SOLBC/redeem-tx` → unsigned `finalizeRedeem` tx → sign + submit; (5) `/redeem-transaction` with `ticketId` → record + auto-confirm. See "Step 7: Capital Flows" for the full inline `node -e` example. |
 | `Check minimum deposit for SOLBC` / `What's the smallest deposit I can make into SOLBC` | `POST /vaults/SOLBC/check-min-deposit` with `{ minDeposit: <amount> }`. **This call is also a mandatory gate inside the deposit flow** — see "Deposit 5 USDC into SOLBC" above. Throws 400 if below threshold. Threshold = vault's underlying-asset count, or `MINI_DEPOSIT` env (default 5) if no allocations. |
 | `Check minimum redeem` / `What's the smallest redeem amount` | `POST /check-min-redeem` with `{ minRedeem: <amount> }`. **This call is also a mandatory gate inside the redeem flow** — see "Redeem 1.5 SOLBC" above. Returns `200 { isValid, message }` — read `isValid` rather than relying on HTTP status. Threshold is global (`MINI_REDEEM` env, default 4). |
+| `How many SOLBC shares do I hold?` / `What's my position in POP-DTF?` / `Show my share balance for <vault>` | `GET /api/v2/agent/vaults/<SYMBOL>/shares`. **Wallet is read from the JWT — do NOT pass `?wallet=` unless the user explicitly asks about a different wallet's holdings.** Reads the wallet's vault-token ATA balance directly from on-chain (no DB). Returns `{ sharesRaw, sharesUi, exists, ata, vaultMintPda, ... }`. When `exists: false` (the wallet has never deposited into the vault), surface as *"You don't currently hold any `<SYMBOL>` shares."*. Also use this to sanity-check before a redeem when the user says e.g. *"redeem all my SOLBC"* — read the balance, then pass `sharesUi` as `vaultTokenAmount` into the redeem flow. |
 | `Generate a Solana keypair for my DFM Agent wallet` | Creates keypair, saves to file, writes env var, reports public key only |
 
 ## Troubleshooting
