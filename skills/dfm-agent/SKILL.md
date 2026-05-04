@@ -1286,11 +1286,28 @@ const req = client.request(url, {
       return;
     }
     const failedSwaps = json.swap?.failedSwapsInfo;
-    const recordError = json.deposit?.events?.[0]?.vaultDepositUpdateError;
-    console.log("DEPOSIT_OK"
-      + " event=" + json.deposit?.events?.[0]?.eventType
-      + (failedSwaps ? " WARN_failedSwaps=" + JSON.stringify(failedSwaps) : "")
-      + (recordError ? " WARN_recordError=" + recordError : ""));
+    const ev = json.deposit?.events?.[0] || {};
+    const recordError = ev.vaultDepositUpdateError;
+    const sharePriceDepositUsd = inputs.etfSharePriceRaw
+      ? Number(inputs.etfSharePriceRaw) / 1e6
+      : null;
+    // Print every field needed to format the deposit summary AND to be
+    // remembered for the eventual redeem (so the agent can compute a real
+    // P&L breakdown later instead of guessing "market loss").
+    console.log(JSON.stringify({
+      event: ev.eventType,
+      vaultName: ev.vaultName,
+      vaultSymbol: ev.vaultSymbol,
+      grossUsdcRaw: ev.amount,                          // 6 decimals
+      entryFeeRaw: ev.entryFee,                         // 6 decimals
+      managementFeeRaw: ev.managementFee,               // 6 decimals (typically 0 at deposit)
+      netUsdcRaw: ev.netAmount,                         // amount that actually became shares
+      sharesMintedRaw: ev.vaultTokensMinted,            // 6 decimals
+      sharePriceDepositUsd,                             // share price baked into THIS deposit
+      onChainSig: inputs.onChainSig,
+      failedSwaps: failedSwaps || null,
+      recordError: recordError || null,
+    }));
   });
 });
 req.on("error", (e) => console.log("ERROR: " + e.message));
@@ -1299,7 +1316,27 @@ req.end();
 ' "$STEP_7A1_OUTPUT"  # JSON string from Step 7a-1
 ```
 
-Surface to the user: *"Deposited `<amount>` USDC into `<vaultName>`. On-chain signature: `<sig>`. `<n>` underlying swaps completed."* If `failedSwapsInfo` is present, append *"`<failedCount>` swap(s) failed and the USDC was returned to the vault — no funds lost."*
+#### Deposit completion messaging — MANDATORY format
+
+**Symmetric to the redeem messaging rules.** When summarising a deposit, the agent must read `entryFee` and `sharePriceDepositUsd` from the script's JSON output, surface them transparently, and **remember them in conversation memory** so a future redeem call can show a true P&L breakdown instead of guessing.
+
+**Required user-facing summary (template):**
+```
+Deposit complete — `<vaultName>` (`<vaultSymbol>`).
+
+• USDC deposited (gross): <grossUsdcRaw / 1e6> USDC
+• Entry fee: <entryFeeRaw / 1e6> USDC
+• USDC that purchased shares: <netUsdcRaw / 1e6> USDC
+• Shares minted: <sharesMintedRaw / 1e6> <vaultSymbol>
+• Share price at deposit: $<sharePriceDepositUsd>
+• On-chain signature: <onChainSig>
+```
+
+If `failedSwaps` is present, append exactly: *"`<failedCount>` underlying swap(s) failed and the USDC was returned to the vault — no funds lost."* Do not invent any other failure narrative.
+
+If `recordError` is present, append exactly: *"On-chain deposit succeeded, but the database record-write failed — the chain-event pipeline will reconcile shortly. Your shares are minted on-chain regardless."*
+
+**Remember-for-later (conversation context):** stash `{ vaultSymbol, grossUsdcRaw, entryFeeRaw, sharesMintedRaw, sharePriceDepositUsd, onChainSig }` so when the same user later redeems from the same vault, the redeem-completion summary can include the deposit-side fee + a real NAV-change calculation.
 
 #### 7b. Redeem Flow (4 sub-steps after pre-flight)
 
@@ -1438,15 +1475,91 @@ function call(path, method, body) {
     ticketId
   });
   if (rec.status !== 200) { console.log("RECORD_ERROR", rec); return; }
-  console.log("REDEEM_OK"
-    + " event=" + rec.body.events?.[0]?.eventType
-    + " netUsdc=" + rec.body.events?.[0]?.netStablecoinAmount
-    + " ticketConfirm=" + JSON.stringify(rec.body.ticketConfirm));
+
+  // Surface every field needed to format the redeem summary correctly.
+  // The agent MUST use these to break down the delta as fees (not market loss)
+  // unless sharePrice actually moved between deposit and redeem — see the
+  // "Redeem completion messaging" section below the script.
+  const ev = rec.body.events?.[0] || {};
+  const sharePriceRedeemUsd = build.body.etfSharePriceRaw
+    ? Number(build.body.etfSharePriceRaw) / 1e6
+    : null;
+  console.log(JSON.stringify({
+    event: ev.eventType,
+    vaultName: ev.vaultName,
+    vaultSymbol: ev.vaultSymbol,
+    sharesRedeemedRaw: ev.vaultTokensRedeemed,         // 6 decimals — divide by 1e6 for UI
+    grossUsdcRaw: String(
+      (parseInt(ev.netStablecoinAmount || "0")
+        + parseInt(ev.exitFee || "0")
+        + parseInt(ev.managementFee || "0"))
+    ),                                                  // pre-fee USDC
+    netUsdcRaw: ev.netStablecoinAmount,                // post-fee USDC
+    exitFeeRaw: ev.exitFee,                             // 6 decimals
+    managementFeeRaw: ev.managementFee,                 // 6 decimals
+    totalFeesRaw: ev.totalFees,                         // 6 decimals
+    sharePriceRedeemUsd,                                // share price baked into THIS redeem
+    onChainSig,
+    ticketConfirm: rec.body.ticketConfirm,
+  }));
 })().catch(e => console.log("FATAL", e?.message || String(e)));
 ' <vaultSymbol> <uiAmount>
 ```
 
-Run with `timeout: 600000` (10 minutes). Surface to the user: *"Redeemed `<uiAmount>` `<vaultSymbol>` for `<netUsdcDecimal>` USDC. On-chain signature: `<sig>`."*
+Run with `timeout: 600000` (10 minutes). The script prints a single JSON line with every field needed to format the user-facing summary correctly — see "Redeem completion messaging" below.
+
+#### Redeem completion messaging — MANDATORY format
+
+The delta between what the user receives in USDC and what they originally deposited is **almost always fees, not market loss**. The vault collects an entry fee on deposit and an exit fee + management fee on redeem; together those bps add up to the difference. Misattributing this to "market discount", "loss from inception price", or "asset price drop" is **wrong** unless the share price has actually moved between deposit and redeem — and even then, fees are the larger driver for short holding periods.
+
+**What the agent must read from the redeem response:**
+- `events[].vaultTokensRedeemed` (raw, 6 dec) — divide by `1e6` for UI shares.
+- `events[].netStablecoinAmount` (raw, 6 dec) — net USDC paid out, **after** exit fee + management fee.
+- `events[].exitFee` (raw, 6 dec) — exit fee charged on this redeem.
+- `events[].managementFee` (raw, 6 dec) — management fee charged on this redeem.
+- `events[].totalFees` (raw, 6 dec) — convenience sum of the above two.
+- `etfSharePriceRaw` from the build-tx response (raw u64, 6 dec) — share price at time of redeem. Convert via `/ 1e6` for USD.
+
+**Required JSON the script outputs has all of this — use it directly. Do NOT compute the user-facing summary from `netStablecoinAmount` alone.**
+
+**Decomposing the delta:**
+1. `exitFee_usdc = exitFeeRaw / 1e6`
+2. `mgmtFee_usdc = managementFeeRaw / 1e6`
+3. `redeemSideFees_usdc = exitFee_usdc + mgmtFee_usdc` (= `totalFees / 1e6`)
+4. **The deposit-side entry fee was charged earlier and is NOT part of this redeem's response.** If the agent has the original deposit's `entryFee` cached in conversation memory (from the `/deposit-transaction` step in the same session), include it; otherwise omit it from the breakdown rather than inventing a number.
+5. **NAV change** is `(sharePriceRedeemUsd − sharePriceDepositUsd) × sharesRedeemed`. Only mention this if the agent has both share prices and they actually differ. If you don't have the deposit-time share price, **do not** describe the delta as market movement.
+
+**Required user-facing summary (template):**
+```
+Redeem complete — `<vaultSymbol>`.
+
+• Shares redeemed: <sharesRedeemedRaw / 1e6> <vaultSymbol>
+• USDC received (net): <netUsdcRaw / 1e6> USDC
+• Fees on this redeem: <totalFeesRaw / 1e6> USDC (exit: <exitFeeRaw / 1e6>, management: <managementFeeRaw / 1e6>)
+• Share price at redemption: $<sharePriceRedeemUsd>
+• On-chain signature: <onChainSig>
+```
+
+If the agent has the original deposit recorded in this session, append:
+```
+• Compared to your original deposit of <depositGrossUsdc> USDC:
+    – Entry fee paid at deposit: <entryFeeUsdc> USDC
+    – Exit + management fees on this redeem: <totalFeesUsdc> USDC
+    – NAV change: <navChangeUsdc> USDC (positive = vault gained, negative = vault lost)
+    – Net P&L: <netUsdcRaw / 1e6 − depositGrossUsdc> USDC
+```
+
+**Forbidden phrasings (the agent MUST NOT use these unless it has actual share-price comparison data showing real NAV movement):**
+- "small loss from market discount on JUP / RAY / <asset>" — the underlyings' on-chain price doesn't pass through to the vault NAV in real time; only `sharePrice` does.
+- "loss from the vault's inception price" — there is no "inception price" tracked in the response.
+- "the assets are worth less than when you deposited" — read `sharePriceRedeemUsd` and prove this before saying it.
+- "tracking error" / "slippage from your basket" — the on-chain `finalizeRedeem` doesn't slip the user; slippage was in the prior `redeemAgentSwapAdmin` step (server-side, vault-internal).
+
+If `netUsdcRaw < depositGrossUsdc` (user got back less than they put in) and the agent **doesn't have** the deposit-time share price, the correct phrasing is:
+> *"You received `<netUsdcRaw / 1e6>` USDC after entry, exit, and management fees. The full breakdown of fees: …"*
+
+Not:
+> *"…a small loss reflecting the current discount on JUP and RAY from the vault's inception price."*
 
 #### CRITICAL ERROR HANDLING for capital flows
 
@@ -1629,6 +1742,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Don't wait for approval** on rebalancing or fee distribution. Rebalance policy check is non-blocking — proceed even when `policyCheck.flagged` is true.
 - **Don't send USDC in launch payloads.** Never include `USDC` / `USD Coin` in `underlyingAssets`.
 - **Don't send secret keys to the backend.** Only public keys are sent. Signing happens locally.
+- **Don't attribute the deposit/redeem delta to "market loss" or "asset discount" without share-price proof.** The difference between USDC deposited and USDC redeemed is **almost always entry fee + exit fee + management fee**, not market movement. Read `events[].exitFee` and `events[].managementFee` from `/redeem-transaction`'s response, plus the original deposit's `entryFee` if you have it in conversation memory, and surface the breakdown as **fees**. Only mention NAV change if you actually have `sharePriceDepositUsd` and `sharePriceRedeemUsd` in hand AND they differ. Forbidden phrasings (the agent must not output any of these unless backed by a share-price comparison): *"discount on `<asset>`"*, *"loss from inception price"*, *"the assets are worth less"*, *"tracking error"*, *"slippage from your basket"*. See "Step 7 → Redeem completion messaging" for the exact template.
 
 ## Setup Guide
 
