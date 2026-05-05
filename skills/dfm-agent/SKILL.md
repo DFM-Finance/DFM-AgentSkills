@@ -432,6 +432,7 @@ Use this skill when:
 - The user asks to **deposit USDC into a vault** or **redeem vault tokens** (capital flows are agent-bound — see "Step 7: Capital Flows")
 - The user asks **"how many shares do I hold in `<vault>`?"** or **"what's my position in `<vault>`?"** — read the on-chain ATA balance via `GET /vaults/:symbol/shares`. Also the right pre-flight call when the user says *"redeem all my `<vault>`"*.
 - The user asks for **"all DTFs on the platform"** / **"every vault on DFM"** / **"what DTFs are available"** — run the **platform-wide listing flow** (Step 5: Manage → "Listing all platform DTFs"): two vault-type fetches across all pages with featured/non-featured enrichment, merged into one combined table. **This is different from "my vaults"** — do not route platform-wide phrasings to `/vaults/user`; that endpoint is user-scoped.
+- The user asks for a **"list" of platform DTFs with details** — *"give me list of all DTFs"*, *"give me detailed data of all vaults"*, *"list every vault with full info"* — run the same platform-wide listing flow but render **detailed mode** (Step 5: Manage → "Detailed listing mode"): summary table at top, then per-vault detail blocks (overview + composition) for every vault. Default to detailed mode whenever the user says "list" with any "details / full / everything" qualifier; default to the compact summary table for bare "show me" / "browse" / "what's available" phrasings.
 - The user needs to set up agent auth (wallet generation, token management)
 
 ## Autonomous DTF Launch -- How It Works
@@ -1166,6 +1167,159 @@ Here are all DTFs on the platform — <total> in total (<dtfCount> DTFs and <yie
 - Listing only featured vaults when the user said "all" — the user explicitly wants both.
 
 **When the user follows up with a filter ("only featured" / "only DTFs" / "highest TVL"):** re-render the same combined table with rows filtered accordingly. Don't re-fetch; you already have the full set in conversation context.
+
+#### Detailed listing mode — render every field from the response
+
+When the user asks for a **"list"** of platform DTFs in a way that implies they want full data on each vault — *"give me list of all DTFs"*, *"give me detailed data of all vaults on DFM"*, *"list all vaults with details"*, *"show every vault with full info"*, *"what DTFs are available — give me the full data"* — render the detailed format instead of the compact summary table. The detailed format is **additive**, not replacement: lead with the same compact summary table, then render one detail block per vault below it.
+
+**Trigger phrasings that select detailed mode (vs the summary-only mode above):**
+
+| Phrasing | Mode |
+|---|---|
+| *"show me all DTFs"*, *"what DTFs are available"*, *"browse vaults"*, *"list DTFs"* | Summary table only (the §"Listing all platform DTFs" flow above). |
+| *"give me list"*, *"give me the list"*, *"give me detailed data"*, *"list with details"*, *"show every vault with full data"*, *"give me everything you have on each vault"*, *"detailed list of all DTFs"* | **Detailed mode** — summary table at top, then per-vault detail blocks. |
+
+If the phrasing is ambiguous, prefer detailed mode — the user asked for a "list", they generally want the data the platform has on each vault, not just symbols and TVL.
+
+**Algorithm:** identical to the summary-only flow (four `fetchAll` passes, build `featuredSymbols` set, merge). The difference is the rendering — emit the summary table first, then iterate the merged rows in the same sort order and render one detail block per vault.
+
+**Output template (detailed mode — summary table + per-vault detail blocks):**
+
+```
+✅ RIGHT — detailed platform-wide DTF listing:
+
+Here are all DTFs on the DFM platform — <total> in total (<dtfCount> DTFs and <yieldCount> Yield DTFs, of which <featuredCount> are platform-featured). Summary at the top, full details for each vault below.
+
+| Type      | Featured | Symbol     | Name                              | TVL (USD)  | 7d %    | Fee   |
+| --------- | -------- | ---------- | --------------------------------- | ---------- | ------- | ----- |
+| DTF       | ⭐        | AGE-DTF    | Agentonomy                        | $19.34     | 0.00%   | 1.50% |
+| DTF       | ⭐        | ICM-DTF    | ICM Prime                         | $11.97     | 0.00%   | 1.50% |
+| DTF       |          | TASR       | TA Structure Rotation             | $11.17     | 0.00%   | 2.00% |
+| ...       |          | ...        | ...                               | ...        | ...     | ...   |
+
+---
+
+**1. AGE-DTF — Agentonomy** ⭐
+
+*AI agent tokens basket designed for narrative exposure to autonomous agents, agent launchpads, and "agent-driven markets". This is intentionally higher volatility and more reflexive than DeFi.*
+
+Tags: AI-agents, agent-economy, high-beta, narrative-index, experimental
+
+Overview:
+
+| Field         | Value             |
+| ------------- | ----------------- |
+| Symbol        | AGE-DTF           |
+| Type          | DTF               |
+| Category      | Manual            |
+| Vault index   | 53                |
+| Vault address | FdxU…tp8B         |
+| TVL           | $19.34            |
+| Share price   | $1.7615           |
+| NAV           | $19.34            |
+| Total supply  | 10.981699         |
+| Mgmt fee      | 1.50%             |
+| 7d perf       | 0.00%             |
+| APY           | —                 |
+| Creator       | Tops (HzgvD…rUrM) |
+
+Composition (7 assets):
+
+| Symbol  | Asset             | Allocation |
+| ------- | ----------------- | ---------- |
+| VIRTUAL | Virtual Protocol  | 40.00%     |
+| ZEREBRO | zerebro           | 25.00%     |
+| RENDER  | Render Token      | 15.00%     |
+| NOS     | Nosana            | 12.00%     |
+| GRASS   | Grass             | 6.00%      |
+| IO      | IO                | 1.00%      |
+| DITH    | Dither            | 1.00%      |
+
+---
+
+**2. ICM-DTF — ICM Prime** ⭐
+
+*Solana's Internet Capital Markets stack in one index: issuance and attention markets plus the core rails for trading, leverage, and settlement.*
+
+Tags: ICM, capital-markets, Solana, trading-rails, infra, high-beta
+
+Overview:
+
+| Field         | Value             |
+| ------------- | ----------------- |
+| Symbol        | ICM-DTF           |
+| Type          | DTF               |
+| Category      | Manual            |
+| Vault index   | 47                |
+| Vault address | 3eH1…Vuqx         |
+| TVL           | $11.97            |
+| Share price   | $0.9882           |
+| NAV           | $11.97            |
+| Total supply  | 12.111534         |
+| Mgmt fee      | 1.50%             |
+| 7d perf       | 0.00%             |
+| APY           | —                 |
+| Creator       | Tops (HzgvD…rUrM) |
+
+Composition (9 assets):
+
+| Symbol | Asset         | Allocation |
+| ------ | ------------- | ---------- |
+| JUP    | Jupiter       | 18.00%     |
+| RAY    | Raydium       | 16.00%     |
+| PYTH   | Pyth Network  | 15.00%     |
+| ORCA   | Orca          | 12.00%     |
+| PUMP   | Pump          | 12.00%     |
+| DRIFT  | Drift         | 10.00%     |
+| KMNO   | Kamino        | 10.00%     |
+| META   | MetaDAO       | 5.00%      |
+| ORE    | ORE           | 2.00%      |
+
+---
+
+(...repeat one detail block per vault, in the same sort order as the summary table...)
+```
+
+**Per-vault detail block — field schema:**
+
+| Block element | Source | Format / rules |
+|---|---|---|
+| Heading | `vaultSymbol` + `vaultName` | `**<n>. <symbol> — <name>**`; append ` ⭐` when the vault is featured. `<n>` is the row index across the merged sort order. |
+| Description line | `description` | Italicized; render as a single line. Skip the line entirely if `description` is null/empty. |
+| Tags line | `tags[]` | `Tags: <a>, <b>, <c>`. Skip the line entirely if `tags` is empty/missing. |
+| Overview → Symbol | `vaultSymbol` | as-is |
+| Overview → Type | derived (`dtf` → `DTF`, `yield_dtf` → `Yield DTF`) | Title case. |
+| Overview → Category | `category.name` | as-is; if `null`, render `—`. |
+| Overview → Vault index | `vaultIndex` | integer; `—` if missing. |
+| Overview → Vault address | `vaultAddress` | Truncate `<first4>…<last4>` (e.g. `FdxU…tp8B`). **Never** render the full address. |
+| Overview → TVL | `totalValueLocked` | `$<n>.<2dp>` with thousand separators; `$0.00` when 0/null. |
+| Overview → Share price | `sharePrice` | `$<n>.<4dp>`; `—` if null. |
+| Overview → NAV | `nav` (decimal-as-string — parse with `Number()`) | `$<n>.<2dp>`; `—` if null. |
+| Overview → Total supply | `totalSupply` (decimal-as-string) | `<n>.<6dp>`; `—` if null. |
+| Overview → Mgmt fee | `feeConfig.managementFeeBps / 100` | `<n>.<2dp>%`. |
+| Overview → 7d perf | `performance7d` | `+/-<n>.<2dp>%`; `—` when null. Render `0.00%` (not `+0.00%`) when 0. |
+| Overview → APY | `vaultApy` | `<n>.<2dp>%`; `—` when null/0. |
+| Overview → Creator | `creator.name` + `creator.walletAddress` | `<name> (<first4>…<last4>)`. If `creator` is null, render `—`. **Never** render the full wallet, the creator's `_id`, email, avatar URL, social links, or twitter handle — those are internal. |
+| Composition heading | `underlyingAssets.length` | `Composition (<N> assets):` |
+| Composition row → Symbol | `underlyingAssets[].assetAllocation.symbol` | as-is |
+| Composition row → Asset | `underlyingAssets[].assetAllocation.name` | as-is |
+| Composition row → Allocation | `underlyingAssets[].pct_bps / 100` | `<n>.<2dp>%`. Sort rows by `pct_bps` descending. |
+
+**Separator between vaults:** `---` on its own line. No separator after the last vault.
+
+**Banned in detailed output (in addition to the summary-mode bans):**
+- Internal Mongo `_id` fields (vault, asset allocation, category, creator) — never surface them.
+- Full wallet addresses or vault addresses — always truncate `<first4>…<last4>`.
+- `logoUrl`, `avatar`, `twitter_username`, `email`, `socialLinks`, `useAvatarImage`, `useTwitterImage` — internal/PII; never render in chat.
+- `daoconfig`, `_id`, `id` duplicates from the response — backend artifacts.
+- Rendering `pct_bps` as the raw integer ("2600 bps") — always convert to a percent.
+- Rendering `nav` / `totalSupply` / `sharePrice` as the raw 6-decimal string ("`960675`", "`1.000016`") without conversion — always parse and format per the schema above.
+- Saying "this is from the platform's database" / "fetched from /vaults/user" / any backend-internal phrasing.
+- Showing a separate detail block but omitting the summary table — the summary always leads.
+
+**Empty / sparse responses:** if `pagination.total === 0` for both endpoints (no DTFs at all), do not render a table or detail blocks; respond with one line: *"There are no DTFs on the DFM platform yet."* If only one vault type returns rows, omit the empty type from the summary header line ("`<dtfCount> DTFs and 0 Yield DTFs`" → "`<dtfCount> DTFs`").
+
+**Length guard:** if the merged set has more than 20 vaults, render the summary table for all rows but trim detail blocks to the **top 20** (by sort order) and append a one-line note at the bottom: *"Showing full details for the top 20 vaults. Tell me a symbol or filter (`only featured`, `only Yield DTFs`, `top 5 by TVL`) and I'll expand any subset."* Below 20 vaults: render every detail block.
 
 #### Displaying `/dtf/:symbol/state` — multi-table layout
 
