@@ -1293,6 +1293,168 @@ If the user **declines**, surface a one-line warning: the on-chain basket target
 
 Surface a one-line summary to the user: "Updated `<vaultName>` basket to `<asset1 pct1%, asset2 pct2%, ...>` and rebalanced. On-chain signatures — update: `<updateSig>`, rebalance: `<rebalanceSig>`." The agent should NEVER expose endpoint names, payload shapes, or HTTP methods in user-facing messages — only the outcome.
 
+#### Multi-step migration when the desired change exceeds `max_rebalance_pct`
+
+Some basket migrations cannot fit in a single `/update-assets-tx` because the aggregate movement (sum of `|new_bps - old_bps|` across every mint) exceeds the vault's `max_rebalance_pct`. In that case the agent must split the migration into **two basket updates** with a **mandatory cooldown wait** between them (the cooldown is enforced by `rule9MinTimeBetweenRebalances`, gated on `min_rebalance_interval_hours`).
+
+**When this pattern is triggered:**
+1. The agent computes aggregate movement before sending `/update-assets-tx`. If it exceeds `max_rebalance_pct`, plan a transitional basket up-front instead of letting the backend reject.
+2. OR the backend returns `400` with `rule8MaxPctRebalancedPerTx` / per-update movement cap — same response, agent now plans the split.
+
+**The two-step pattern:**
+
+```
+Step 1 (now): transitional basket — moves some weight, fits the cap.
+              ├─ /update-assets-tx (Phase 2)
+              ├─ sign + submit
+              ├─ /underlying-assets-by-mint (Phase 3 — DB sync)
+              └─ /rebalance (Phase 4 — fan-in actually moves the holdings)
+
+  …wait at least min_rebalance_interval_hours…
+
+Step 2 (later): final basket — moves the remaining weight.
+                ├─ /update-assets-tx (Phase 2)
+                ├─ sign + submit
+                ├─ /underlying-assets-by-mint (Phase 3)
+                └─ /rebalance (Phase 4)
+```
+
+**Computing the transitional basket:** pick allocations such that:
+- Aggregate `|new_bps - old_bps|` ≤ `max_rebalance_pct - 500` (a 500 bps safety buffer below the cap).
+- The transitional basket is on the path between current and final — partial moves toward the final allocations, not arbitrary intermediate ones.
+- Every transitional asset must already pass the policy gate on its own (don't introduce an asset just to drop it again).
+
+**Surface the plan to the user UPFRONT, before starting Step 1**, in plain English. The user must understand they're agreeing to a two-stage migration, not a single update:
+
+```
+✅ RIGHT — multi-step plan announcement (table format):
+
+The change you've requested is larger than this vault permits in a single
+basket update. I'll do it in two stages, with a `<min_rebalance_interval_hours>`-hour
+wait between them.
+
+Stage 1 (now):
+
+| Symbol  | From    | → To    | Δ        |
+| ------- | ------- | ------- | -------- |
+| HNT     | 25.00%  | →  0.00%| -25.00%  |
+| SOL     |  0.00%  | → 20.00%| +20.00%  |
+| RENDER  | 30.00%  | → 25.00%|  -5.00%  |
+| ZEREBRO | 25.00%  | → 30.00%|  +5.00%  |
+| ORCA    | 20.00%  | → 20.00%|   —      |
+| PUMP    |  0.00%  | →  5.00%|  +5.00%  |
+
+Stage 2 (after cooldown clears):
+
+| Symbol  | From (post-Stage-1) | → To    | Δ        |
+| ------- | ------------------- | ------- | -------- |
+| SOL     | 20.00%              | → 30.00%| +10.00%  |
+| ZEREBRO | 30.00%              | → 20.00%| -10.00%  |
+| RENDER  | 25.00%              | →  0.00%| -25.00%  |
+| ORCA    | 20.00%              | → 15.00%|  -5.00%  |
+| PUMP    |  5.00%              | → 20.00%| +15.00%  |
+| BONK    |  0.00%              | → 15.00%| +15.00%  |
+
+Confirm to proceed with Stage 1 now?
+```
+
+**After Stage 1 completes** (rebalance returns 200), record the cooldown end time and surface a clean status to the user — never paste rule codes:
+
+```
+✅ RIGHT — Stage 1 done, Stage 2 pending:
+
+Stage 1 complete. The vault is now holding the transitional mix shown above.
+
+Stage 2 needs to wait until the rebalance cooldown clears — earliest run is
+about <H>h <M>m from now (around <YYYY-MM-DD HH:mm UTC>). Tell me
+"continue Stage 2" when you're ready and I'll run it then.
+```
+
+**Stage boundary — HARD STOP between Stage 1 and Stage 2.**
+
+This is the most-violated rule in the multi-step migration flow. After Stage 1's rebalance returns 200, the agent **MUST end the turn** with the "Stage 2 pending" message above. It must NOT do any of the following in the same turn:
+
+- ❌ Attempt `/update-assets-tx` for the Stage 2 / final basket — this will be blocked by the cooldown and the only thing that produces is wasted noise.
+- ❌ Call `/rebalance/check` on the Stage 2 basket "to see what would be flagged".
+- ❌ Surface the Stage 2 attempt result to the user — even as a "for your information, I tried Stage 2 and it's blocked until <time>". The plan-announcement message at the start already told the user about the wait; restating it via a failed-attempt narrative is noise, not information.
+- ❌ Loop / retry / poll for the cooldown to clear inside the same turn. The user controls when Stage 2 runs by saying *"continue Stage 2"*.
+
+The agent's complete Stage 1 turn ends after the rebalance message is posted. Stage 2 runs in a **separate turn** triggered by the user's next message.
+
+**Banned in the user-facing output for either stage:**
+- Mentioning `rule9MinTimeBetweenRebalances`, `rule8MaxPctRebalancedPerTx`, or any other code.
+- Phrases like "the cooldown gate fires", "policy enforces a 4h interval", "max_rebalance_pct is 8000 bps".
+- Endpoint names (`/update-assets-tx`, `/rebalance`).
+- HTTP statuses (`201`, `400`, `403`).
+- Phase numbers ("Phase 1B", "Phase 2A") — these are skill-internal.
+- Phrasings like *"blocked with 400"*, *"flagged: true"*, *"review flags"*.
+- **Failed-attempt narratives** — never tell the user "I tried Stage 2 / a second update, but it was blocked because…". If the agent attempted something internally and it failed (whether due to cooldown, policy, or anything else), that's an internal recovery; the user-facing message must still be the clean "Stage 1 done, Stage 2 pending" template above. The user already knows about the wait from the plan announcement; reporting the failed attempt is wasted noise.
+
+**Cooldown-aware pre-flight before each `/update-assets-tx` call** — the rule is: *don't even try when the cooldown is active*.
+
+The agent does not "discover" the cooldown by attempting `/update-assets-tx` and reading the rejection. It computes the cooldown deterministically up-front and decides not to call:
+
+1. After any successful `/rebalance` or `/update-assets-tx` in this session, **stash the timestamp** in conversation memory as `lastRebalanceAt`.
+2. **Before any `/update-assets-tx`** (Stage 1 OR Stage 2 OR a fresh single-step migration): compute `now - lastRebalanceAt`. If it's below `min_rebalance_interval_hours` (read once from `/dtf/:symbol/policy` and stash it too), **do NOT call `/update-assets-tx`**. Surface the wait time to the user in plain English and end the turn.
+3. If the conversation is fresh and you don't have a stashed `lastRebalanceAt`, call `GET /dtf/:vaultSymbol/rebalance/check` ONCE before the first `/update-assets-tx`. If `policyCheck.flagged: true` with a cooldown-related flag in `reviewFlags`, the cooldown is still active — translate to plain English, surface, end the turn.
+4. The most common case during a multi-step migration: Stage 1's `/rebalance` just succeeded. The agent stashed the timestamp. **Stage 2 in the same turn would always fail this pre-flight check**, so the agent never even tries — it goes straight to the "Stage 1 done, Stage 2 pending" message and ends the turn. That's the entire point of the hard-stop rule above.
+
+**When the user says "continue Stage 2" (next turn):**
+1. Run the cooldown pre-flight again. If still active (user came back too soon), surface the remaining wait and end the turn — do not attempt.
+2. Re-fetch `/dtf/:symbol/state` to confirm the vault is in the post-Stage-1 state. If unexpected, surface and stop.
+3. Run Phases 1–4 with the Stage 2 basket. Same WRONG/RIGHT output rules apply.
+4. Final summary after both stages complete: a single closing paragraph that names both stage signatures, no per-stage debug log.
+
+#### WRONG vs RIGHT — update-asset operation summaries
+
+Real-world example: the user just received the following BAD trace from the agent. It's a phase-by-phase debug log — every numbered line and every API/HTTP fragment below is forbidden:
+
+```
+❌ WRONG — every fragment below is banned:
+
+Pre-flight (every operation batch)
+- Synced/validated env via .claude/settings.json
+  (DFM_API_URL, DFM_AUTH_TOKEN, DFM_AGENT_KEYPAIR, …)
+
+Phase 0: State + proposal alignment
+- Fetched GET /api/v2/agent/dtf/AIPIN/state.
+
+Phase 1A: Metrics/mint resolution
+- Called GET /api/v2/agent/market-metrics?symbols=SOL,ZEREBRO,…
+
+Phase 1B: Transitional basket on-chain build+submit
+- Target: SOL 20% / ZEREBRO 25% / RENDER 20% / ORCA 20% / PUMP 15%.
+- Called POST /api/v2/agent/vaults/AIPIN/update-assets-tx with mintBps.
+- On-chain success signature: 47H2Vumu2C…
+
+Phase 1C: Transitional basket DB sync
+- First attempt failed: PATCH … → 403 ("Only the vault creator can perform this action").
+- After your backend fix, retried: Same PATCH + same body → 200 success.
+
+Phase 2A: Final basket on-chain build attempt
+- Called POST /api/v2/agent/vaults/AIPIN/update-assets-tx.
+- Blocked with 400: rule9MinTimeBetweenRebalances (4h cooldown not elapsed).
+
+Phase 2B: Rebalance check (diagnostic)
+- Called GET /api/v2/agent/dtf/AIPIN/rebalance/check.
+- Returned ok: true, flagged: true with:
+  rule8MaxPctRebalancedPerTx (10000 bps movement vs 8000 max),
+  rule9MinTimeBetweenRebalances (cooldown remaining).
+
+Phase 2C: Rebalance execution
+- Called POST /api/v2/agent/dtf/AIPIN/rebalance with signer pubkey.
+- HTTP 201, ok: true. Fees: upfront 0.005 SOL, actual 0.000335 SOL.
+```
+
+What's wrong with the above (in addition to the standard "no endpoint paths / HTTP codes / rule codes / JSON internals" rules):
+
+- **It's a phase-by-phase trace.** The user does not need to know the agent ran Phase 1A then 1B then 1C. The agent reports OUTCOMES, not steps.
+- **It exposes recovery internals** ("First attempt failed... after your backend fix, retried"). The user's chat is not a postmortem channel.
+- **It surfaces fee internals** ("upfront 0.005 SOL, actual 0.000335 SOL"). Only mention if the user asked about fees.
+- **It leaves the migration in an ambiguous state** — "Step 2... not completed yet". The agent must end with a clear next-action: either *"Stage 2 will run automatically when the cooldown clears at HH:mm"* OR *"Tell me 'continue Stage 2' to finish the migration"*. Never leave the user wondering.
+
+The RIGHT version of the same trace is the **multi-step plan** + **stage-completion summary** templates above — two clean tabular messages with no debug detail, ending with an explicit prompt for the user's next action.
+
 #### CRITICAL ERROR HANDLING for update underlying
 
 1. **`/update-assets-tx` returns 400 with `violations[]`** (before any signing): policy gate failed — nothing on-chain. Loop Phase 1 with adjustments. Free.
