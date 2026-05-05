@@ -1102,7 +1102,7 @@ All management operations are single API calls. No confirmation needed.
 
 ### Step 6: Update Underlying Assets (Four-Phase Flow)
 
-When the user says **"update underlying"**, **"change the basket"**, **"swap assets"**, **"rebalance to X"**, or any phrasing that means "replace the vault's `underlyingAssets` allocations", run this four-phase flow. **Do not ask for confirmation between Phases 1–3.** Phase 4 (rebalance) is mandatory after a basket change, but ask the user once before executing it.
+When the user says **"update underlying"**, **"change the basket"**, **"swap assets"**, **"rebalance to X"**, or any phrasing that means "replace the vault's `underlyingAssets` allocations", run this four-phase flow. **All four phases are mandatory and run autonomously — no per-phase user confirmation.** Phase 4 (rebalance) **always** runs at the end of every asset-update flow with zero exceptions: a basket change without the rebalance leaves the vault drifting (on-chain target ≠ actual holdings), so the rebalance is part of the operation, not an optional follow-up.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -1130,16 +1130,13 @@ When the user says **"update underlying"**, **"change the basket"**, **"swap ass
 │      (Note: pct_bps, NOT mintBps — different field name)                 │
 │      Auto-flushes agent:vaults:* caches.                                 │
 │                                                                          │
-│  Phase 4: REBALANCE (MANDATORY — ASK USER FIRST)                          │
-│    Ask the user: "Rebalancing is required to apply the new basket.        │
-│      Confirm to execute now?"                                            │
-│    On confirm:                                                           │
-│      POST /api/v2/agent/dtf/:symbol/rebalance                            │
-│        { signerPublicKey }                                               │
-│      Admin wallet executes swaps server-side.                            │
-│    On decline: warn the user that the on-chain basket targets the         │
-│      new allocations but the vault's holdings still match the old        │
-│      basket; drift persists until they trigger a rebalance later.        │
+│  Phase 4: REBALANCE (STRICTLY MANDATORY — RUNS AUTOMATICALLY)             │
+│    POST /api/v2/agent/dtf/:symbol/rebalance                              │
+│      { signerPublicKey }                                                 │
+│    Admin wallet executes swaps server-side. No user confirmation gate    │
+│    — this phase ALWAYS runs after Phase 3 completes. A basket change    │
+│    without the rebalance leaves the vault drifting (on-chain target ≠   │
+│    actual holdings), so the rebalance is part of the operation.          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1277,17 +1274,23 @@ req.end();
 
 **Why both phases?** Phase 2 mutates on-chain state; Phase 3 makes the change visible to read endpoints (`/vaults/user`, `/vaults/featured/list`) immediately. The chain-event pipeline does eventually backfill the DB on its own, but PATCH gives synchronous visibility — the user expects "show me my vault" to reflect the new basket immediately after they say "update underlying".
 
-#### Phase 4 — Rebalance (mandatory, with user confirmation)
+#### Phase 4 — Rebalance (STRICTLY mandatory, runs automatically)
 
-After Phase 3 completes, the on-chain basket targets the new allocations but the vault still holds the old asset mix. Rebalancing is **required** to bring actual holdings in line with the new basket — without it, the vault drifts.
+**Phase 4 always runs** as the closing step of every asset-update flow — there is no user-confirmation gate, there is no decline path, and the agent does not phrase it as optional. After Phase 3's PATCH returns 200, the agent immediately calls `/rebalance` and waits for completion. The user is asked **once** at the very start of the flow ("confirm to update the basket?") and that single confirmation covers all four phases including this one. The rebalance is part of the operation, not a follow-up question.
 
-**Ask the user once** in plain language before triggering it: e.g. *"The basket update is on-chain and synced. Rebalancing to the new allocations is required — confirm to execute now?"* Then call:
+**Why strict:** Phase 2 changes the on-chain basket *targets* (what the vault should hold). Phase 4 reconciles the vault's *actual holdings* with those new targets. Skipping Phase 4 leaves the vault drifting indefinitely — on-chain target ≠ actual holdings — and any deposit during that drift uses the wrong allocations. There is no use case where a basket change without a rebalance is the correct outcome.
+
+**The call:**
 
 `POST {DFM_API_URL}/api/v2/agent/dtf/:symbol/rebalance` with `{ signerPublicKey }`.
 
-This is the same `/rebalance` endpoint used in the rebalance section — the admin wallet executes the swaps server-side, so the agent only sends the request and surfaces the result. Use the `vaultSymbol` (not `vaultId`) returned from Phase 2 / Phase 3.
+Same `/rebalance` endpoint used in the standalone rebalance flow. The admin wallet executes the swaps server-side, so the agent only sends the request, awaits the response, and surfaces the result. Use the `vaultSymbol` (not `vaultId`) the agent already has from Phase 2 / Phase 3.
 
-If the user **declines**, surface a one-line warning: the on-chain basket targets the new allocations but actual holdings still match the old basket; the drift persists until they later say "rebalance the vault".
+**Response handling:**
+- `200` / `201` with `ok: true` → Phase 4 done. Capture the rebalance signature for the final summary. If `policyCheck.flagged: true` is present (post-execution review flags), translate via the violation-code table and append to the user-facing summary as a non-blocking warning. **The rebalance still completed** — flagged ≠ failed.
+- Any error response → Phase 4 failed even though Phases 1–3 succeeded. **Do NOT re-run Phase 2 or Phase 3** (basket change is already complete on-chain and in the DB). Surface to the user: *"The basket update is in place, but the rebalance step couldn't complete. The vault's holdings still match the old mix; tell me 'rebalance `<symbol>`' to retry just that step."* End the turn.
+
+**Banned in Phase 4 user-facing output:** the strings *"confirm to execute now?"*, *"would you like to rebalance?"*, *"shall I proceed with the rebalance?"*, or any other phrasing that frames the rebalance as optional. Phase 4 is not a question.
 
 #### After all phases succeed
 
@@ -1331,7 +1334,8 @@ Step 2 (later): final basket — moves the remaining weight.
 
 The change you've requested is larger than this vault permits in a single
 basket update. I'll do it in two stages, with a `<min_rebalance_interval_hours>`-hour
-wait between them.
+wait between them. Each stage updates the basket on-chain AND rebalances
+the holdings to match — no separate rebalance step needed.
 
 Stage 1 (now):
 
