@@ -887,7 +887,37 @@ After launch, the agent autonomously:
 
 **After fetching a page**, surface the navigation footer to the user: e.g. "Page 2 of 5 — say 'next page' for more, or 'page N' to jump." Use `pagination.hasNext` / `pagination.hasPrev` to decide which controls to mention. Never hide pagination from the user — if `pagination.totalPages > 1` they need to know more pages exist.
 
-**Response shape (both endpoints):** `{ data: Vault[], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. Each `Vault` carries `vaultName`, `vaultSymbol`, `vaultAddress`, `description`, `vaultIndex`, `tags[]`, `feeConfig.managementFeeBps`, `underlyingAssets[]` (each with nested `assetAllocation: { name, symbol, logoUrl }` and `pct_bps`), `creator` (rich profile object: `name`, `walletAddress`, `avatar`, `twitter_username`), `category: { name }`, `totalValueLocked`, `sharePrice`, `vaultApy`, `performance7d`, plus string-typed `nav` and `totalSupply`. See `references/api-reference.md` § 12a for the full field table.
+**Response shape (both endpoints — paginated, NOT envelope-wrapped):**
+
+```json
+{
+  "data": [/* array of Vault objects */],
+  "pagination": { "page": 1, "limit": 10, "total": 5, "totalPages": 1, "hasNext": false, "hasPrev": false }
+}
+```
+
+The vault list is `body.data` — **a flat array directly on `data`**. Iterate `body.data.map(...)` to walk the vaults; read `body.pagination` for navigation.
+
+**Common mistakes — DO NOT make these reads:**
+
+| Wrong access | Why it fails | Correct access |
+|---|---|---|
+| `body.data.vaults` | The array is `body.data` itself; there is no nested `vaults` key here. (You're confusing it with the legacy `/dtf/my-vaults` shape, which DOES wrap as `{ vaults: [...], total }`.) | `body.data` |
+| `body.data.data` | These two endpoints carry a `pagination` field, so the global `ResponseMiddleware` does **not** wrap them with `{ status, message, data: ... }`. There is no double-`data`. | `body.data` |
+| `body.vaults` | No top-level `vaults` field on these endpoints. | `body.data` |
+| `body.results` / `body.items` | Generic-API instinct that doesn't match this contract. | `body.data` |
+
+**Why the response is unwrapped:** the global `ResponseMiddleware` interceptor passes any response with a top-level `pagination` field through as-is (no `{ status, message, data }` envelope). The skill's `call()` helper handles this automatically — it leaves paginated responses untouched. If you ever see `body.status === "success"` on a list endpoint, something is wrong upstream; treat it as a malformed response and surface to the user.
+
+**Vault item fields:** each `Vault` in `body.data` carries `vaultName`, `vaultSymbol`, `vaultAddress`, `description`, `vaultIndex`, `tags[]`, `feeConfig.managementFeeBps`, `underlyingAssets[]` (each with nested `assetAllocation: { name, symbol, logoUrl }` and `pct_bps`), `creator` (rich profile object: `name`, `walletAddress`, `avatar`, `twitter_username`), `category: { name }`, `totalValueLocked`, `sharePrice`, `vaultApy`, `performance7d`, plus string-typed `nav` and `totalSupply`. See `references/api-reference.md` § 12a for the full field table.
+
+**Endpoint vs. response-shape cheat sheet** (the difference between these is the most common source of "vault listing" bugs):
+
+| Endpoint | Response shape | Status |
+|---|---|---|
+| `GET /vaults/featured/list` | `{ data: Vault[], pagination: {...} }` | **Use this** — paginated, current. |
+| `GET /vaults/user` | `{ data: Vault[], pagination: {...} }` | **Use this** — paginated, current. |
+| `GET /dtf/my-vaults` | `{ vaults: Vault[], total: number }` | **Legacy / deprecated** — different shape. Don't read this from the agent unless explicitly asked; route every "my vaults" phrasing to `/vaults/user`. |
 
 **When displaying vault lists to the user, surface the readable fields** — `vaultName` / `vaultSymbol`, `description`, the asset basket as a comma-separated `symbol pct%` summary (divide `pct_bps` by 100), `totalValueLocked` formatted as USD, `performance7d` as a percentage, `feeConfig.managementFeeBps / 100` as the fee %, and `creator.name` (or `creator.twitter_username`) as the author. **Skip `_id`, `id`, raw `pct_bps`, internal Mongo fields, and `daoconfig: null`.** `nav` and `totalSupply` are decimal-safe strings — parse with `Number()` before any math, and treat `"0"` / `null` `vaultApy` / `null` `performance7d` as "no data yet" for new vaults.
 
@@ -1858,6 +1888,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Don't send secret keys to the backend.** Only public keys are sent. Signing happens locally.
 - **Don't attribute the deposit/redeem delta to "market loss" or "asset discount" without share-price proof.** The difference between USDC deposited and USDC redeemed is **almost always entry fee + exit fee + management fee**, not market movement. Read `events[].exitFee` and `events[].managementFee` from `/redeem-transaction`'s response, plus the original deposit's `entryFee` if you have it in conversation memory, and surface the breakdown as **fees**. Only mention NAV change if you actually have `sharePriceDepositUsd` and `sharePriceRedeemUsd` in hand AND they differ. Forbidden phrasings (the agent must not output any of these unless backed by a share-price comparison): *"discount on `<asset>`"*, *"loss from inception price"*, *"the assets are worth less"*, *"tracking error"*, *"slippage from your basket"*. See "Step 7 → Redeem completion messaging" for the exact template.
 - **Don't surface deposit/redeem success before the final OK line.** Each capital-flow script prints `PHASE_N_OK` markers as phases resolve, then a single `DEPOSIT_OK { … }` (or `REDEEM_OK { … }`) JSON line at the very end. Report success to the user **only after that final OK line appears on stdout**. Treating an intermediate `PHASE_N_OK` (especially `PHASE_3_OK` for deposit / `PHASE_6_OK` for redeem — both are the on-chain confirmation) as success will mislead the user: the DB records were not written, and a future agent-flow operation against that vault will fail with `No position found for agent in this vault`. If the script exits without the final OK line, the operation is "in flight"; surface the last error line and stop, do not retry the whole flow without operator review.
+- **Don't misread the listing-endpoint response shape.** `/vaults/featured/list` and `/vaults/user` carry a top-level `pagination` field, which means the global `ResponseMiddleware` passes them through **without** the `{ status, message, data }` envelope. The vault array is at **`body.data`** — a flat array. There is no `body.data.vaults`, no `body.data.data`, no `body.vaults`, no `body.results`. Reading any of those returns `undefined` and you'll falsely report "no vaults found" when the user has plenty. The legacy `/dtf/my-vaults` is the only listing endpoint that wraps as `{ vaults: [...], total }` — and you shouldn't be calling it anyway (it's deprecated; route every "my vaults" phrasing to `/vaults/user`). When in doubt, log `body.data.length` first to verify the shape.
 
 ## Setup Guide
 
@@ -2090,6 +2121,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **`/redeem-transaction` returns 400 `redeemAgentTransaction requires performedByProfileId`** | The JWT didn't carry `agentId`. Re-run the token refresh script (`node .claude/refresh-token.js`) — the new token will populate `agentPayload.agentId` correctly. |
 | **409 "Username is already taken" on profile-launch** | The `profile-launch.js` script auto-retries up to 5 times with a random 4-char hex suffix appended to the sanitized base username. If you see this error surface to the user, the script ran out of retries — pick a more distinctive base username and re-run. |
 | **409 "An agent profile already exists for this wallet address" on profile-launch** | The wallet has already been onboarded — do **NOT** call `profile-launch` again (and the script does not retry on this 409). Use `node .claude/refresh-token.js` to issue a fresh JWT for the existing agent profile instead (the script derives the agent wallet from `DFM_AGENT_KEYPAIR`). |
+| **`/vaults/featured/list` or `/vaults/user` "returns no vaults" but the user has them** | Almost always a misread of the response shape, not an empty list. These endpoints carry a `pagination` field, so the global `ResponseMiddleware` does **not** wrap them — the array is at `body.data` (not `body.data.vaults`, not `body.data.data`, not `body.vaults`). Only `/dtf/my-vaults` (legacy) returns `{ vaults: [...], total }`. See "Step 5: Manage" → "Common mistakes" table for every wrong-access pattern. Re-run the call and read `body.data.length` first; if `> 0`, the bug is downstream of the fetch. |
 
 ## Security
 
