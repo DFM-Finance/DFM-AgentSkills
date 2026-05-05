@@ -431,6 +431,7 @@ Use this skill when:
 - The user asks to rebalance a vault or distribute fees
 - The user asks to **deposit USDC into a vault** or **redeem vault tokens** (capital flows are agent-bound — see "Step 7: Capital Flows")
 - The user asks **"how many shares do I hold in `<vault>`?"** or **"what's my position in `<vault>`?"** — read the on-chain ATA balance via `GET /vaults/:symbol/shares`. Also the right pre-flight call when the user says *"redeem all my `<vault>`"*.
+- The user asks for **"all DTFs on the platform"** / **"every vault on DFM"** / **"what DTFs are available"** — run the **platform-wide listing flow** (Step 5: Manage → "Listing all platform DTFs"): two vault-type fetches across all pages with featured/non-featured enrichment, merged into one combined table. **This is different from "my vaults"** — do not route platform-wide phrasings to `/vaults/user`; that endpoint is user-scoped.
 - The user needs to set up agent auth (wallet generation, token management)
 
 ## Autonomous DTF Launch -- How It Works
@@ -1017,6 +1018,140 @@ Here are your vaults — 13 in total (9 DTFs and 4 Yield DTFs).
 - **No "paginated across all pages"** — pagination is an internal mechanism. If you fetched multiple pages to assemble the answer, say nothing about it. If `totalPages > 1` and you only fetched page 1, **then** add a one-line footer below the table: *"Page 1 of N — say 'next page' for more."* That's the only acceptable mention of pagination, and only when relevant.
 - **No unsolicited follow-up offers.** Don't end with *"If you want, I can also return this with…"*.
 - **TVL = $0.00 / 7d = `—` for new vaults** — never invent numbers; render `null` / `"0"` as `$0.00` / `—`.
+
+#### Listing all platform DTFs (both vault types, all pages, featured + non-featured)
+
+When the user asks for **all DTFs on the platform** — *"list all DTFs on DFM"*, *"show me every vault on the platform"*, *"what DTFs are available on DFM"*, *"give me list of vaults available on DFM"*, *"browse all DTFs"* — the agent runs a **platform-wide listing flow**. This is structurally different from *"my vaults"*: the endpoint is `/vaults/featured/list`, the result set is everything the platform has indexed (regardless of creator), and the table includes both vault types side-by-side.
+
+**Algorithm:**
+
+1. **Two vault-type passes.** Run the listing for `vaultType=dtf` and `vaultType=yield_dtf` independently. Don't try to merge with a single call — the endpoint always filters by one type.
+2. **Paginate each pass to completion.** Start at `page=1` with `limit=50` (the larger limit reduces round-trips). After each call, read `pagination.hasNext`; if `true`, increment `page` and repeat. Continue until `hasNext === false`. Always send `includeTvl=true`.
+3. **Featured-vs-non-featured enrichment** (mark which vaults are featured):
+   - First sub-pass: `isFeaturedVault=true` → mark each returned vault as featured.
+   - Second sub-pass: omit `isFeaturedVault` (returns ALL vaults of that type) → vaults not in the featured set are non-featured.
+   - Build a single map keyed by `vaultSymbol` (or `_id`) so featured vaults aren't double-counted in the combined table.
+4. **Merge into one output table** with vault type as a column, featured-flag as a column, and one row per unique vault.
+
+**Inline `node -e` example** for a single vault-type pass (the agent runs this twice — once with `dtf`, once with `yield_dtf` — and merges the results in conversation context):
+
+```bash
+node -e '
+const http = require("http");
+const https = require("https");
+async function fetchAll(vaultType, isFeatured) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    const url = new URL(process.env.DFM_API_URL
+      + "/api/v2/agent/vaults/featured/list"
+      + `?page=${page}&limit=50&includeTvl=true&vaultType=${vaultType}`
+      + (isFeatured === true ? "&isFeaturedVault=true" : ""));
+    const client = url.protocol === "https:" ? https : http;
+    const r = await new Promise((resolve, reject) => {
+      const req = client.get(url, {
+        headers: { "Authorization": "Bearer " + process.env.DFM_AUTH_TOKEN }
+      }, (res) => {
+        let data = ""; res.on("data", (c) => data += c);
+        res.on("end", () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { resolve({ status: res.statusCode, body: data }); }
+        });
+      });
+      req.on("error", reject);
+    });
+    if (r.status !== 200) {
+      console.log("ERROR " + r.status + ": " + JSON.stringify(r.body));
+      return all;
+    }
+    all.push(...(r.body.data || []));
+    if (!r.body.pagination?.hasNext) break;
+    page += 1;
+  }
+  return all;
+}
+(async () => {
+  const dtfFeatured = await fetchAll("dtf", true);
+  const dtfAll      = await fetchAll("dtf");
+  const ydtfFeatured = await fetchAll("yield_dtf", true);
+  const ydtfAll      = await fetchAll("yield_dtf");
+
+  const featuredSymbols = new Set([
+    ...dtfFeatured.map(v => v.vaultSymbol),
+    ...ydtfFeatured.map(v => v.vaultSymbol),
+  ]);
+
+  const rows = [
+    ...dtfAll.map(v => ({ ...v, _type: "DTF",       _featured: featuredSymbols.has(v.vaultSymbol) })),
+    ...ydtfAll.map(v => ({ ...v, _type: "Yield DTF", _featured: featuredSymbols.has(v.vaultSymbol) })),
+  ];
+
+  console.log(JSON.stringify({
+    totalDtf: dtfAll.length,
+    totalYieldDtf: ydtfAll.length,
+    featuredCount: featuredSymbols.size,
+    rows: rows.map(v => ({
+      type: v._type,
+      featured: v._featured,
+      symbol: v.vaultSymbol,
+      name: v.vaultName,
+      tvl: v.totalValueLocked,
+      perf7d: v.performance7d,
+      feeBps: v.feeConfig?.managementFeeBps,
+      apy: v.vaultApy,
+    })),
+  }));
+})().catch(e => console.log("FATAL " + (e?.message || String(e))));
+'
+```
+
+**Output template (mandatory — single combined table):**
+
+```
+✅ RIGHT — platform-wide DTF listing:
+
+Here are all DTFs on the platform — <total> in total (<dtfCount> DTFs and <yieldCount> Yield DTFs, of which <featuredCount> are platform-featured).
+
+| Type      | Featured | Symbol     | Name                              | TVL (USD)  | 7d %    | Fee   |
+| --------- | -------- | ---------- | --------------------------------- | ---------- | ------- | ----- |
+| DTF       | ⭐        | AGE-DTF    | Agentonomy                        | $14.80     | +13.01% | 1.50% |
+| DTF       | ⭐        | ICM-DTF    | ICM Prime                         | $0.00      | —       | 1.50% |
+| DTF       |          | AIPIN      | Solana AI + DePIN Infrastructure  | $1,240.50  | +3.41%  | 1.50% |
+| DTF       |          | TASR       | TA Structure Rotation             | $890.10    | -0.12%  | 2.00% |
+| DTF       |          | POP-DTF    | Popeye Index                      | $14.80     | +13.01% | 1.50% |
+| DTF       |          | EXECX      | Execution Stack X                 | $0.00      | —       | 2.00% |
+| DTF       |          | BARBL      | Barbell Degen                     | $0.00      | —       | 2.00% |
+| DTF       |          | OBLETH     | Open Blacklist ETH                | $0.00      | —       | 1.50% |
+| DTF       |          | WHL3       | TriGuard White                    | $0.00      | —       | 1.50% |
+| Yield DTF | ⭐        | NX6-YDTF   | NEXUS-6                           | $0.00      | —       | 2.00% |
+| Yield DTF | ⭐        | REA-YDTF   | Real Bastion                      | $0.00      | —       | 2.00% |
+| Yield DTF | ⭐        | AUR-YDTF   | Aurum Stake                       | $0.00      | —       | 2.00% |
+| Yield DTF |          | YLST       | Solana Yield LST                  | $0.00      | —       | 1.00% |
+```
+
+**Column schema (platform-wide listing):**
+
+| Column | Source | Format |
+|---|---|---|
+| Type | derived (`vaultType` → "DTF" / "Yield DTF") | Title-case. |
+| Featured | derived from the `isFeaturedVault=true` pass membership | `⭐` when featured; **empty cell** (not `—`, not `false`) when not. |
+| Symbol | `vaultSymbol` | as-is |
+| Name | `vaultName` | as-is |
+| TVL (USD) | `totalValueLocked` | `$<n>.<2dp>` with thousand separators; `$0.00` when 0 |
+| 7d % | `performance7d` | `+/-<n>.<2dp>%`; `—` when null |
+| Fee | `feeConfig.managementFeeBps / 100` | `<n>.<2dp>%` |
+
+**Sort order (mandatory):** group by type (DTFs first, Yield DTFs second), then within each group sort featured rows ahead of non-featured, then by `totalValueLocked` descending. This puts the highest-signal vaults at the top of each group.
+
+**Pagination footer:** **never show one** for platform-wide listings — the agent already paginated to completion across both vault types. The user's "all DTFs" intent is satisfied in a single response. If the combined list is unmanageably long (say 50+ rows), append a one-line note offering to filter: *"That's everything on the platform. Want me to filter to just featured, just DTFs, or by TVL?"*
+
+**Banned in this output:**
+- "from `/vaults/featured/list`" or any endpoint mention.
+- "paginated across all pages" — the user doesn't need to know how the data was assembled.
+- Separating featured vs non-featured into two separate tables — they go into ONE table with the Featured column distinguishing them.
+- Listing only featured vaults when the user said "all" — the user explicitly wants both.
+
+**When the user follows up with a filter ("only featured" / "only DTFs" / "highest TVL"):** re-render the same combined table with rows filtered accordingly. Don't re-fetch; you already have the full set in conversation context.
 
 #### Displaying `/dtf/:symbol/state` — multi-table layout
 
@@ -2524,7 +2659,8 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Set up my DFM agent` | Asks for wallet address, creates agent profile via `/profile-launch`, saves auth token, generates keypair |
 | `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
 | `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
-| `Show me my vaults` / `List my DTFs` / `Give me list of vaults available on DFM` / `What vaults do I have on DFM` / `List my vaults` | **Always use `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true`** (always start at page 1; switch `vaultType=yield_dtf` for yield funds). **Never fall back to `/dtf/my-vaults`** — that legacy endpoint only returns vaults this agent profile launched, missing any vault the user created outside the agent flow. `/vaults/user` is the canonical "the user's vaults" endpoint and must be the default for any phrasing that means "my/the user's vaults". |
+| `Show me my vaults` / `List my DTFs` / `What vaults do I have on DFM` / `List my vaults` / `My positions` | **User-scoped only.** Always use `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (always start at page 1; switch `vaultType=yield_dtf` for yield funds). **Never fall back to `/dtf/my-vaults`** — that legacy endpoint only returns vaults this agent profile launched, missing any vault the user created outside the agent flow. `/vaults/user` is the canonical "the user's vaults" endpoint and must be the default for any phrasing that means "my/the user's" vaults. **Do NOT route to this endpoint when the user says "all DTFs on the platform" or any other platform-wide phrasing — see the next row.** |
+| `List all DTFs on DFM` / `Show me every vault on the platform` / `What DTFs are available on DFM` / `All platform vaults` / `Browse all DTFs` / `Give me list of vaults available on DFM` | **Platform-wide listing — different endpoint than "my vaults".** Use `GET /vaults/featured/list` to fetch the platform marketplace. The agent must (a) iterate across **both** `vaultType=dtf` AND `vaultType=yield_dtf`, (b) paginate each vault-type pass until `pagination.hasNext === false`, and (c) optionally enrich with featured vs non-featured by making the same call twice with `isFeaturedVault=true` then with no filter. Merge into a single combined table output flagging featured vaults — see "Listing all platform DTFs" sub-section in Step 5: Manage for the full algorithm and the user-facing template. |
 | `Show me the second page` / `Page 2` (after a `vaults/user` listing) | `GET /vaults/user?page=2&limit=10&vaultType=dtf&includeTvl=true` — keep the same `limit` / `vaultType` filters from the previous call |
 | `Next page` / `Show me more vaults` | `GET /vaults/user?page=<lastShown+1>&limit=...` — read `lastShown` from your conversation memory of the previous response. Stop and tell the user "you're on the last page" if `pagination.hasNext` was `false`. |
 | `Previous page` / `Go back` | `GET /vaults/user?page=<lastShown-1>&limit=...` — clamp at `page=1`. |
