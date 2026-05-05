@@ -1021,32 +1021,39 @@ Here are your vaults — 13 in total (9 DTFs and 4 Yield DTFs).
 
 #### Listing all platform DTFs (both vault types, all pages, featured + non-featured)
 
-When the user asks for **all DTFs on the platform** — *"list all DTFs on DFM"*, *"show me every vault on the platform"*, *"what DTFs are available on DFM"*, *"give me list of vaults available on DFM"*, *"browse all DTFs"* — the agent runs a **platform-wide listing flow**. This is structurally different from *"my vaults"*: the endpoint is `/vaults/featured/list`, the result set is everything the platform has indexed (regardless of creator), and the table includes both vault types side-by-side.
+When the user asks for **all DTFs on the platform** — *"list all DTFs on DFM"*, *"show me every vault on the platform"*, *"what DTFs are available on DFM"*, *"give me list of vaults available on DFM"*, *"browse all DTFs"* — the agent runs a **platform-wide listing flow** by combining two separate endpoints (the platform exposes them as different surfaces — there is no `isFeaturedVault` query filter; do **not** invent one):
+
+| Endpoint | What it returns | Use for |
+|---|---|---|
+| `GET /vaults/user?vaultType=<type>` | **Universal — every vault on the platform** of the given type. | The "all DTFs" baseline. |
+| `GET /vaults/featured/list?vaultType=<type>` | **Featured-only** — the curated subset surfaced on the platform's featured section. | Cross-reference to flag which baseline rows are featured. |
+
+Both endpoints take the same `page` / `limit` / `vaultType` / `includeTvl` query params and return the same paginated `{ data: Vault[], pagination: {...} }` shape (no envelope wrap). The agent fetches each independently, paginates to completion, and merges in conversation context.
 
 **Algorithm:**
 
-1. **Two vault-type passes.** Run the listing for `vaultType=dtf` and `vaultType=yield_dtf` independently. Don't try to merge with a single call — the endpoint always filters by one type.
-2. **Paginate each pass to completion.** Start at `page=1` with `limit=50` (the larger limit reduces round-trips). After each call, read `pagination.hasNext`; if `true`, increment `page` and repeat. Continue until `hasNext === false`. Always send `includeTvl=true`.
-3. **Featured-vs-non-featured enrichment** (mark which vaults are featured):
-   - First sub-pass: `isFeaturedVault=true` → mark each returned vault as featured.
-   - Second sub-pass: omit `isFeaturedVault` (returns ALL vaults of that type) → vaults not in the featured set are non-featured.
-   - Build a single map keyed by `vaultSymbol` (or `_id`) so featured vaults aren't double-counted in the combined table.
-4. **Merge into one output table** with vault type as a column, featured-flag as a column, and one row per unique vault.
+1. **Two vault-type passes per endpoint** — run with `vaultType=dtf` and `vaultType=yield_dtf` separately. The endpoints filter by exactly one type.
+2. **Paginate each pass to completion.** Start at `page=1` with `limit=50` (larger limit, fewer round-trips). After each call, read `pagination.hasNext`; if `true`, increment `page` and repeat. Stop when `hasNext === false`. Always send `includeTvl=true`.
+3. **Cross-reference for the Featured column** — build a `Set` of `vaultSymbol` values from the `/vaults/featured/list` results. For each vault from `/vaults/user`, set `_featured = true` if its symbol is in that set, otherwise `false`.
+4. **Merge into one output table** — vault type as a column, featured flag as a column, one row per unique vault from `/vaults/user`.
 
-**Inline `node -e` example** for a single vault-type pass (the agent runs this twice — once with `dtf`, once with `yield_dtf` — and merges the results in conversation context):
+**No `isFeaturedVault` query parameter exists on either endpoint.** Do not append `&isFeaturedVault=true` or `&isFeaturedVault=false` — the platform uses the two-endpoint split (universal vs. featured-only) instead.
+
+**Inline `node -e` example** — runs four fetch passes in total (universal × two vault types, plus featured × two vault types), merges, emits one JSON for the user-facing table:
 
 ```bash
 node -e '
 const http = require("http");
 const https = require("https");
-async function fetchAll(vaultType, isFeatured) {
+
+// Generic paginate-to-completion against either listing endpoint.
+async function fetchAll(path, vaultType) {
   const all = [];
   let page = 1;
   while (true) {
     const url = new URL(process.env.DFM_API_URL
-      + "/api/v2/agent/vaults/featured/list"
-      + `?page=${page}&limit=50&includeTvl=true&vaultType=${vaultType}`
-      + (isFeatured === true ? "&isFeaturedVault=true" : ""));
+      + path
+      + `?page=${page}&limit=50&includeTvl=true&vaultType=${vaultType}`);
     const client = url.protocol === "https:" ? https : http;
     const r = await new Promise((resolve, reject) => {
       const req = client.get(url, {
@@ -1061,7 +1068,7 @@ async function fetchAll(vaultType, isFeatured) {
       req.on("error", reject);
     });
     if (r.status !== 200) {
-      console.log("ERROR " + r.status + ": " + JSON.stringify(r.body));
+      console.log("ERROR " + r.status + " from " + path + ": " + JSON.stringify(r.body));
       return all;
     }
     all.push(...(r.body.data || []));
@@ -1070,19 +1077,24 @@ async function fetchAll(vaultType, isFeatured) {
   }
   return all;
 }
-(async () => {
-  const dtfFeatured = await fetchAll("dtf", true);
-  const dtfAll      = await fetchAll("dtf");
-  const ydtfFeatured = await fetchAll("yield_dtf", true);
-  const ydtfAll      = await fetchAll("yield_dtf");
 
+(async () => {
+  // Universal — every vault on the platform.
+  const dtfAll  = await fetchAll("/api/v2/agent/vaults/user", "dtf");
+  const ydtfAll = await fetchAll("/api/v2/agent/vaults/user", "yield_dtf");
+
+  // Featured — curated subset surfaced on the platform.
+  const dtfFeatured  = await fetchAll("/api/v2/agent/vaults/featured/list", "dtf");
+  const ydtfFeatured = await fetchAll("/api/v2/agent/vaults/featured/list", "yield_dtf");
+
+  // Build the featured-symbol set for the Featured column.
   const featuredSymbols = new Set([
     ...dtfFeatured.map(v => v.vaultSymbol),
     ...ydtfFeatured.map(v => v.vaultSymbol),
   ]);
 
   const rows = [
-    ...dtfAll.map(v => ({ ...v, _type: "DTF",       _featured: featuredSymbols.has(v.vaultSymbol) })),
+    ...dtfAll.map(v  => ({ ...v, _type: "DTF",       _featured: featuredSymbols.has(v.vaultSymbol) })),
     ...ydtfAll.map(v => ({ ...v, _type: "Yield DTF", _featured: featuredSymbols.has(v.vaultSymbol) })),
   ];
 
@@ -1104,6 +1116,8 @@ async function fetchAll(vaultType, isFeatured) {
 })().catch(e => console.log("FATAL " + (e?.message || String(e))));
 '
 ```
+
+**Featured-only listings** (when the user says *"show featured vaults"*, *"only featured"*, *"what's curated on the platform"*) skip the universal pass entirely — call only `/vaults/featured/list?vaultType=dtf` and `/vaults/featured/list?vaultType=yield_dtf`, paginate each, render in the same combined table format. Every row in that output is featured by definition (no Featured column needed; or render the column with `⭐` on every row for visual consistency).
 
 **Output template (mandatory — single combined table):**
 
@@ -1134,7 +1148,7 @@ Here are all DTFs on the platform — <total> in total (<dtfCount> DTFs and <yie
 | Column | Source | Format |
 |---|---|---|
 | Type | derived (`vaultType` → "DTF" / "Yield DTF") | Title-case. |
-| Featured | derived from the `isFeaturedVault=true` pass membership | `⭐` when featured; **empty cell** (not `—`, not `false`) when not. |
+| Featured | `true` when the vault's symbol appears in the `/vaults/featured/list` result set; `false` otherwise. (Cross-reference, not a response field.) | `⭐` when featured; **empty cell** (not `—`, not `false`) when not. |
 | Symbol | `vaultSymbol` | as-is |
 | Name | `vaultName` | as-is |
 | TVL (USD) | `totalValueLocked` | `$<n>.<2dp>` with thousand separators; `$0.00` when 0 |
@@ -2660,7 +2674,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | `Launch a Solana blue chip fund` | Researches top SOL tokens → fetches `/market-metrics` for authoritative liquidity/volume → decides basket + policy → loops `/policy/dry-run` until clean → `/launch-dtf` with policy → signs + submits → `/dtf-create` metadata |
 | `Create a meme token DTF with 3% fee` | Finds trending meme tokens, calibrates policy thresholds against `/market-metrics`, dry-runs until clean, deploys |
 | `Show me my vaults` / `List my DTFs` / `What vaults do I have on DFM` / `List my vaults` / `My positions` | **User-scoped only.** Always use `GET /vaults/user?page=1&limit=10&vaultType=dtf&includeTvl=true` (always start at page 1; switch `vaultType=yield_dtf` for yield funds). **Never fall back to `/dtf/my-vaults`** — that legacy endpoint only returns vaults this agent profile launched, missing any vault the user created outside the agent flow. `/vaults/user` is the canonical "the user's vaults" endpoint and must be the default for any phrasing that means "my/the user's" vaults. **Do NOT route to this endpoint when the user says "all DTFs on the platform" or any other platform-wide phrasing — see the next row.** |
-| `List all DTFs on DFM` / `Show me every vault on the platform` / `What DTFs are available on DFM` / `All platform vaults` / `Browse all DTFs` / `Give me list of vaults available on DFM` | **Platform-wide listing — different endpoint than "my vaults".** Use `GET /vaults/featured/list` to fetch the platform marketplace. The agent must (a) iterate across **both** `vaultType=dtf` AND `vaultType=yield_dtf`, (b) paginate each vault-type pass until `pagination.hasNext === false`, and (c) optionally enrich with featured vs non-featured by making the same call twice with `isFeaturedVault=true` then with no filter. Merge into a single combined table output flagging featured vaults — see "Listing all platform DTFs" sub-section in Step 5: Manage for the full algorithm and the user-facing template. |
+| `List all DTFs on DFM` / `Show me every vault on the platform` / `What DTFs are available on DFM` / `All platform vaults` / `Browse all DTFs` / `Give me list of vaults available on DFM` | **Platform-wide listing — uses TWO separate endpoints.** Universal listing comes from `GET /vaults/user` (despite the name, this is the universal endpoint that returns every vault on the platform). Featured-only listing comes from `GET /vaults/featured/list`. **There is no `isFeaturedVault` query parameter — do not append one.** The agent must (a) call `/vaults/user?vaultType=dtf` and `/vaults/user?vaultType=yield_dtf`, paginate each to completion (this is the baseline "all vaults" set); (b) call `/vaults/featured/list` with the same two vault types to build a `Set` of featured `vaultSymbol`s; (c) merge — every row from `/vaults/user`, with the Featured column flagged when the vault's symbol is in the featured set. See "Listing all platform DTFs" sub-section in Step 5: Manage for the full algorithm, node script, and user-facing template. |
 | `Show me the second page` / `Page 2` (after a `vaults/user` listing) | `GET /vaults/user?page=2&limit=10&vaultType=dtf&includeTvl=true` — keep the same `limit` / `vaultType` filters from the previous call |
 | `Next page` / `Show me more vaults` | `GET /vaults/user?page=<lastShown+1>&limit=...` — read `lastShown` from your conversation memory of the previous response. Stop and tell the user "you're on the last page" if `pagination.hasNext` was `false`. |
 | `Previous page` / `Go back` | `GET /vaults/user?page=<lastShown-1>&limit=...` — clamp at `page=1`. |
