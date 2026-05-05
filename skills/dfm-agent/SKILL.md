@@ -485,6 +485,31 @@ Use these numbers to:
 - **Calibrate `min_amm_liquidity_usd` and `min_24h_volume_usd`** in the policy with a **safety buffer of 30–50% below the weakest selected asset's `/market-metrics` number**. Jupiter snapshots fluctuate intraday — setting the floor *at* the weakest asset's current value guarantees the asset will dip below the floor on a bad snapshot and become "locked" in the basket (the agent can no longer remove it via `/update-assets-tx`, because any intermediate basket that still contains the locked asset fails the volume gate). Concrete rule: **floor = floor(weakest_asset_snapshot × 0.5)**, rounded down to a clean number.
 - **Null values** in `policyRelevant` indicate a transient Jupiter fetch miss; retry after a cache warm-up (the endpoint caches per mint).
 
+**When surfacing market-metrics results to the user, render as a table** — never bullet-list them. Drop `mintAddress` (column noise unless the user asked for it) and the duplicated `policyRelevant` block (already covered by the `Liquidity` and `24h Volume` columns).
+
+```
+✅ RIGHT (market-metrics output):
+
+| Symbol | Name           | Price (USD) | Liquidity     | 24h Volume    | Holders     |
+| ------ | -------------- | ----------- | ------------- | ------------- | ----------- |
+| SOL    | Wrapped SOL    | $85.33      | $691,807,448  | $14,648,499,808 | 3,820,662 |
+| JUP    | Jupiter        | $0.642      | $48,210,005   | $912,440,011  | 612,408     |
+| BONK   | Bonk           | $0.0000231  | $11,002,341   | $74,509,123   | 891,210     |
+```
+
+**Column schema:**
+
+| Column | Source | Format |
+|---|---|---|
+| Symbol | `metrics[].symbol` | as-is |
+| Name | `metrics[].name` | as-is |
+| Price (USD) | `metrics[].price_usd` | `$<n>` (4-6 sig-figs depending on magnitude); for sub-cent tokens use `$0.0000231` style. Hide when `null`. |
+| Liquidity | `metrics[].liquidity_usd` | `$<n>` with thousand separators (round to whole dollars for values > $1M). |
+| 24h Volume | `metrics[].volume_24h_usd` | same as Liquidity. |
+| Holders | `metrics[].holder_count` | integer with thousand separators. Hide column entirely if all rows are null. |
+
+If the response includes an `unresolved[]` list (assets the backend couldn't find), **append a one-line note below the table**: *"Couldn't resolve: BONK (no Jupiter price), XYZ (mint not found)."* Don't render `unresolved` as its own table.
+
 Then decide:
 - Identify candidate tokens based on the user's intent or strategy
 - **For yield DTFs**: Prioritize LSTs and yield-bearing assets with highest APY and deepest liquidity
@@ -949,36 +974,129 @@ Banned fragments above:
 - *"from your DFM account context (/vaults/user, paginated across all pages)"* — leaks the endpoint path and pagination internals. Banned by the "no endpoint paths in user output" rule.
 - *"(highest TVL first) or only 'platform featured' vaults"* — speculative follow-up offering the user didn't ask for, exposes the existence of a separate "featured vaults" surface they don't need to know about.
 
-The RIGHT output for the same listing — one short sentence framing the answer, then the data, then a pagination-aware footer **only** if more pages exist. Nothing else.
+The RIGHT output for the same listing is **always a markdown table** — one short framing sentence, then the table, then a pagination footer **only** if more pages exist. Bulleted lists for vault listings are explicitly banned (see "Output formatting" rule in Behavioral Guidelines).
 
 ```
 ✅ RIGHT:
 
 Here are your vaults — 13 in total (9 DTFs and 4 Yield DTFs).
 
-DTFs:
-  • AIPIN — Solana AI + DePIN Infrastructure
-  • TASR — TA Structure Rotation
-  • OBLETH — Open Blacklist ETH
-  • WHL3 — TriGuard White
-  • POP-DTF — Popeye Index
-  • EXECX — Execution Stack X
-  • BARBL — Barbell Degen
-  • AGE-DTF — Agentonomy
-  • ICM-DTF — ICM Prime
-
-Yield DTFs:
-  • YLST — Solana Yield LST
-  • NX6-YDTF — NEXUS-6
-  • REA-YDTF — Real Bastion
-  • AUR-YDTF — Aurum Stake
+| Type      | Symbol     | Name                              | TVL (USD) | 7d %   | Fee   |
+| --------- | ---------- | --------------------------------- | --------- | ------ | ----- |
+| DTF       | AIPIN      | Solana AI + DePIN Infrastructure  | $1,240.50 | +3.41% | 1.50% |
+| DTF       | TASR       | TA Structure Rotation             | $890.10   | -0.12% | 2.00% |
+| DTF       | OBLETH     | Open Blacklist ETH                | $0.00     | —      | 1.50% |
+| DTF       | WHL3       | TriGuard White                    | $0.00     | —      | 1.50% |
+| DTF       | POP-DTF    | Popeye Index                      | $14.80    | +13.01%| 1.50% |
+| DTF       | EXECX      | Execution Stack X                 | $0.00     | —      | 2.00% |
+| DTF       | BARBL      | Barbell Degen                     | $0.00     | —      | 2.00% |
+| DTF       | AGE-DTF    | Agentonomy                        | $14.80    | +13.01%| 1.50% |
+| DTF       | ICM-DTF    | ICM Prime                         | $0.00     | —      | 1.50% |
+| Yield DTF | YLST       | Solana Yield LST                  | $0.00     | —      | 1.00% |
+| Yield DTF | NX6-YDTF   | NEXUS-6                           | $0.00     | —      | 2.00% |
+| Yield DTF | REA-YDTF   | Real Bastion                      | $0.00     | —      | 2.00% |
+| Yield DTF | AUR-YDTF   | Aurum Stake                       | $0.00     | —      | 2.00% |
 ```
 
-What changed:
-- **No endpoint paths.** "your vaults" / "your DTFs" replaces "from your DFM account context (/vaults/user, ...)". The user does not need to know which endpoint produced the answer.
-- **No "paginated across all pages"** — pagination is an internal mechanism. If you fetched multiple pages to assemble the answer, you say nothing about it. If `totalPages > 1` and you only fetched page 1, **then** add a footer like *"Showing page 1 of N — say 'next page' for more."* That's the only acceptable mention of pagination, and only when relevant.
-- **No unsolicited follow-up offers.** Don't end with *"If you want, I can also return this with…"* — it pads the response with hypothetical work the user hasn't asked for. Wait for the next message.
-- **Asset basket / TVL / fees** are surfaced **only when the user asked for them** ("show me TVL", "what's the basket"). For a plain "list my vaults" request, name + symbol + description is the right detail level.
+**Column schema for vault listings (mandatory):**
+
+| Column | Source | Format |
+|---|---|---|
+| `Type` | `vaultType` ("dtf" → "DTF", "yield_dtf" → "Yield DTF") | Title-case, never raw enum |
+| `Symbol` | `vaultSymbol` | As-is |
+| `Name` | `vaultName` | As-is |
+| `TVL (USD)` | `totalValueLocked` | `$<n>.<2dp>` with thousand separators; `$0.00` when 0 |
+| `7d %` | `performance7d` | `+<n>.<2dp>%` / `-<n>.<2dp>%`; **`—` when `null`** (do NOT show "0.00%" for new vaults) |
+| `Fee` | `feeConfig.managementFeeBps / 100` | `<n>.<2dp>%` |
+
+**Optional columns** — add only when the user asked for them or it's contextually relevant: `Author` (`creator.name` or `creator.twitter_username` prefixed `@`), `APY` (`vaultApy`, `—` for null), `Basket` (top 3 assets by `pct_bps` as `SYM 40% / SYM 30% / SYM 30%`).
+
+**What changed from the WRONG output:**
+- **Strict table format** — every vault is a row. The agent does not get to choose between bullets, numbered lists, or paragraphs for listings. Markdown table only.
+- **No endpoint paths.** "your vaults" replaces "from your DFM account context (/vaults/user, ...)".
+- **No "paginated across all pages"** — pagination is an internal mechanism. If you fetched multiple pages to assemble the answer, say nothing about it. If `totalPages > 1` and you only fetched page 1, **then** add a one-line footer below the table: *"Page 1 of N — say 'next page' for more."* That's the only acceptable mention of pagination, and only when relevant.
+- **No unsolicited follow-up offers.** Don't end with *"If you want, I can also return this with…"*.
+- **TVL = $0.00 / 7d = `—` for new vaults** — never invent numbers; render `null` / `"0"` as `$0.00` / `—`.
+
+#### Displaying `/dtf/:symbol/state` — multi-table layout
+
+The vault-state response carries 4 distinct sections (`vault`, `portfolio`, `userHoldings`, `rebalanceHistory.data[]`). Each goes into its own clearly-labelled markdown table. Lead with a one-line header naming the vault. Skip any section whose data is empty or null.
+
+```
+✅ RIGHT (full state output):
+
+**AIPIN — Solana AI + DePIN Infrastructure**
+
+Vault overview:
+
+| Field        | Value           |
+| ------------ | --------------- |
+| Symbol       | AIPIN           |
+| Type         | DTF             |
+| Status       | active          |
+| TVL          | $1,240.50       |
+| Share price  | $1.0823         |
+| NAV          | $1,240.50       |
+| Total tokens | 1,146.231410    |
+| Mgmt fee     | 1.50%           |
+| 7d perf      | +3.41%          |
+| APY          | —               |
+
+Portfolio (current holdings):
+
+| Symbol  | Allocation | Balance      | Value (USD) |
+| ------- | ---------- | ------------ | ----------- |
+| ZEREBRO | 35.00%     | 142.318      | $434.18     |
+| RENDER  | 30.00%     | 88.512       | $372.15     |
+| ORCA    | 20.00%     | 211.044      | $248.10     |
+| HNT     | 15.00%     | 67.901       | $186.07     |
+
+Your holdings:
+
+| Field         | Value           |
+| ------------- | --------------- |
+| Wallet        | 5HvU…A7B8       |
+| Token balance | 2.543171 AIPIN  |
+| Value         | $2.7536         |
+| Share         | 0.22%           |
+
+Recent rebalances:
+
+| Date (UTC)          | Status     | USDC in   | USDC out  | Duration |
+| ------------------- | ---------- | --------- | --------- | -------- |
+| 2026-04-21 14:02    | completed  | $1,184.32 | $1,182.10 | 47s      |
+| 2026-04-08 09:17    | completed  | $1,021.05 | $1,019.88 | 39s      |
+```
+
+**Vault-overview table — column schema:**
+
+| Field | Source | Format |
+|---|---|---|
+| Symbol | `vault.vaultSymbol` | as-is |
+| Type | `vault.vaultType` | "dtf" → "DTF", "yield_dtf" → "Yield DTF" |
+| Status | `vault.status` | as-is (lowercase) |
+| TVL | `vault.totalValueLocked` | `$<n>.<2dp>` with thousand separators |
+| Share price | `vault.sharePrice` | `$<n>.<4dp>` (more precision than TVL) |
+| NAV | `vault.nav` (decimal-as-string — parse with `Number()` first) | `$<n>.<2dp>` |
+| Total tokens | `vault.totalTokens` (decimal-as-string) | `<n>.<6dp>` |
+| Mgmt fee | `vault.feeConfig.managementFeeBps / 100` | `<n>.<2dp>%` |
+| 7d perf | `vault.performance7d` | `+/-<n>.<2dp>%`, `—` if null |
+| APY | `vault.apy` | `<n>.<2dp>%`, `—` if null/0 |
+
+**Portfolio table — one row per asset in `portfolio.assets[]`:**
+
+| Column | Source | Format |
+|---|---|---|
+| Symbol | `assets[].symbol` | as-is; never show raw `mintAddress` here |
+| Allocation | `assets[].allocationBps / 100` | `<n>.<2dp>%` |
+| Balance | `assets[].balance` (raw u64 — divide by 10^decimals) | `<n>.<6dp>` |
+| Value (USD) | `assets[].valueUsd` | `$<n>.<2dp>` |
+
+Order rows by `allocationBps` descending so the largest position is on top.
+
+**Your holdings table** — show only when `userHoldings.tokenBalance > 0`. Truncate `walletAddress` to `<first4>…<last4>` (e.g. `5HvU…A7B8`) — never show the full address in user output.
+
+**Recent rebalances table** — show only when `rebalanceHistory.data[]` is non-empty; cap at 5 most-recent rows. Convert `startTime` to `YYYY-MM-DD HH:mm` UTC. The `Duration` column is `executionDurationMs / 1000` rounded, suffixed `s`. Hide `_id`, `vaultSymbol` (already in the header), `sellPhaseTransactions`, and `buyPhaseTransactions` arrays — those are too detailed for the summary; show only when the user asks "what assets were swapped".
 
 All management operations are single API calls. No confirmation needed.
 
@@ -1883,6 +2001,35 @@ Notice what the RIGHT version does:
 
 The same plain-English principle applies to the `/rebalance` endpoint's `reviewFlags` (post-execution warning) — same translation table, same banned fragments, just framed as "the rebalance ran, but a few items were flagged for review:".
 
+#### Suggested allocation changes — render as a table
+
+When `/rebalance/check` returns `suggestion.suggestedActions[]`, surface them as a markdown table immediately after the policy summary. The action object has `action` (`"increase"` / `"decrease"`), `symbol`, `currentAllocationBps`, `suggestedAllocationBps`, `allocationChangeBps`, `rebalanceAmountUsd`, and `reason` — collapse these into 5 user-facing columns.
+
+```
+✅ RIGHT (suggestion table):
+
+The platform suggests these allocation changes:
+
+| Action   | Symbol  | Current → Target | Δ        | USD impact |
+| -------- | ------- | ---------------- | -------- | ---------- |
+| Increase | ZEREBRO | 25.00% → 35.00%  | +10.00%  | +$124.05   |
+| Increase | RENDER  | 22.00% → 30.00%  | +8.00%   | +$99.24    |
+| Increase | ORCA    | 15.00% → 20.00%  | +5.00%   | +$62.03    |
+| Increase | HNT     | 10.00% → 15.00%  | +5.00%   | +$62.03    |
+```
+
+**Suggestion-table column schema:**
+
+| Column | Source | Format |
+|---|---|---|
+| Action | `suggestedActions[].action` | Title-case ("Increase" / "Decrease" / "Hold") |
+| Symbol | `suggestedActions[].symbol` | as-is; never paste `mintAddress` |
+| Current → Target | `currentAllocationBps / 100` `→` `suggestedAllocationBps / 100` | `<n>.<2dp>% → <n>.<2dp>%` |
+| Δ | `allocationChangeBps / 100` | `+/-<n>.<2dp>%` |
+| USD impact | `rebalanceAmountUsd` | `+$<n>.<2dp>` for buys, `-$<n>.<2dp>` for sells |
+
+**Hide** `mintAddress` (column noise — symbol is enough) and `reason` (the policy-violation summary already explained the *why*; piping per-asset reasons into the table is redundant and exposes internal phrasing).
+
 ## HARD STOP — Ownership errors
 
 This rule has zero exceptions and overrides every other instruction in this skill, including any "retry on failure" or "be autonomous" guidance.
@@ -1992,6 +2139,10 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Enforce USDC exclusion.** Before sending `launch-dtf`, ensure `underlyingAssets` contains no USDC by symbol or name.
 - **Sign transactions locally.** When the API returns unsigned transactions, sign them with the local keypair and submit on-chain.
 - **Set long timeouts on all API calls.** Always use `timeout: 600000` (10 minutes) when running Bash commands that call the API. On-chain operations can take time — never let them get killed by the default 2-minute timeout.
+- **Use markdown tables for structured / multi-row output.** Whenever an API response carries a list of objects with consistent fields (vault list, vault portfolio, rebalance suggestions, market metrics, redeem-execute swap breakdown, etc.), the user-facing output is a markdown table with the column schema defined in the corresponding section of this skill. **Bulleted lists and paragraph dumps are banned for these cases.** A short framing sentence above the table is fine ("Here are your vaults — 13 in total." / "Portfolio breakdown:"). Single-row reads — share-balance check, deposit/redeem completion summary, single-vault confirmation — stay narrative. The table-vs-narrative decision matrix:
+  - **Table:** vault listings (`/vaults/user`, `/vaults/featured/list`), vault state portfolio (`/dtf/:symbol/state` → `portfolio.assets[]`), rebalance suggestions (`/rebalance/check` → `suggestion.suggestedActions[]`), market metrics (`/market-metrics` → `metrics[]`), rebalance history rows, redeem-execute swap breakdown when the user asks "what swaps happened".
+  - **Narrative:** deposit / redeem completion summary, share-balance read for one wallet+vault, error messages, single-vault state header (the `vault.*` block is rendered as a 2-column table; treat the leading sentence as narrative), one-line confirmations ("Deposited 5 USDC", "Refreshed your token").
+  - **Either:** policy-violation explanations — bulleted list when there are 1–3 flags; table when there are 4+ flags or the user wants thresholds spelled out.
 
 ### DON'T:
 - **NEVER retry on HTTP `403` / `Forbidden`.** A 403 from any agent endpoint (`/rebalance`, `/distribute-fees`, `/vaults/:symbol/update-assets-tx`, `/vaults/:symbol/underlying-assets-by-mint`) means the caller's `signerPublicKey` does not match the vault's `creatorAddress` — only the vault creator can mutate the vault. **STOP IMMEDIATELY.** Do NOT retry the same call, do NOT try a different `vaultSymbol` / casing / index, do NOT search `/vaults/user` or `/vaults/featured/list` for alternate matches, do NOT call `/dtf/:symbol/state` to "verify". Surface a one-line message to the user — e.g. *"That vault belongs to a different wallet. Only the creator can perform this action."* — and end the turn. A 403 is a permission verdict, not a transient error.
