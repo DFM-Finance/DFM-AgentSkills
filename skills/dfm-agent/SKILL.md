@@ -1892,21 +1892,24 @@ Run with `timeout: 600000` (10 minutes). The four `*_OK` markers print as each p
 
 **Symmetric to the redeem messaging rules.** When summarising a deposit, the agent must read `entryFee` and `sharePriceDepositUsd` from the script's JSON output, surface them transparently, and **remember them in conversation memory** so a future redeem call can show a true P&L breakdown instead of guessing.
 
-**Required user-facing summary (template):**
-```
-Deposit complete — `<vaultName>` (`<vaultSymbol>`).
+**Required user-facing summary (template).** Substitute with **divided UI values** — never paste raw u64, never pair raw+UI in parentheses:
 
-• USDC deposited (gross): <grossUsdcRaw / 1e6> USDC
-• Entry fee: <entryFeeRaw / 1e6> USDC
-• USDC that purchased shares: <netUsdcRaw / 1e6> USDC
-• Shares minted: <sharesMintedRaw / 1e6> <vaultSymbol>
+```
+Deposit complete — <vaultName> (<vaultSymbol>).
+
+• USDC deposited (gross): <grossUsdcUi> USDC
+• Entry fee: <entryFeeUi> USDC
+• USDC that purchased shares: <netUsdcUi> USDC
+• Shares minted: <sharesMintedUi> <vaultSymbol>
 • Share price at deposit: $<sharePriceDepositUsd>
 • On-chain signature: <onChainSig>
 ```
 
+Where `<grossUsdcUi> = grossUsdcRaw / 1e6` (formatted to 6 decimal places), `<entryFeeUi> = entryFeeRaw / 1e6` (formatted to 6 decimal places — render as `0.000000` if the fee was 0, never as `0 raw`), and the same conversion for every other `*Ui` placeholder. The raw u64 values stay in the script's `DEPOSIT_OK { … }` JSON for internal use only — never in the chat message.
+
 If `failedSwaps` is present, append exactly: *"`<failedCount>` underlying swap(s) failed and the USDC was returned to the vault — no funds lost."* Do not invent any other failure narrative.
 
-If `recordError` is present, append exactly: *"On-chain deposit succeeded, but the database record-write failed — the chain-event pipeline will reconcile shortly. Your shares are minted on-chain regardless."*
+If `recordError` is present, append exactly: *"On-chain deposit succeeded, but the database record-write failed — the chain-event pipeline will reconcile shortly. Your shares are minted on-chain regardless."* (This is the ONE pre-approved exception to the "no backend-warning trailing notes" rule — it's only used when the on-chain side genuinely succeeded but the DB write didn't, which is a status the user needs to know about.) Do not extend or rephrase this template; the exact wording above is the only acceptable form.
 
 **Remember-for-later (conversation context):** stash `{ vaultSymbol, grossUsdcRaw, entryFeeRaw, sharesMintedRaw, sharePriceDepositUsd, onChainSig }` so when the same user later redeems from the same vault, the redeem-completion summary can include the deposit-side fee + a real NAV-change calculation.
 
@@ -2163,16 +2166,19 @@ The delta between what the user receives in USDC and what they originally deposi
 4. **The deposit-side entry fee was charged earlier and is NOT part of this redeem's response.** If the agent has the original deposit's `entryFee` cached in conversation memory (from the `/deposit-transaction` step in the same session), include it; otherwise omit it from the breakdown rather than inventing a number.
 5. **NAV change** is `(sharePriceRedeemUsd − sharePriceDepositUsd) × sharesRedeemed`. Only mention this if the agent has both share prices and they actually differ. If you don't have the deposit-time share price, **do not** describe the delta as market movement.
 
-**Required user-facing summary (template):**
-```
-Redeem complete — `<vaultSymbol>`.
+**Required user-facing summary (template).** Substitute placeholders with the **divided UI value**, not the raw u64. The agent does the `/ 1e6` conversion **before** rendering — never paste raw values, never pair raw+UI in parentheses:
 
-• Shares redeemed: <sharesRedeemedRaw / 1e6> <vaultSymbol>
-• USDC received (net): <netUsdcRaw / 1e6> USDC
-• Fees on this redeem: <totalFeesRaw / 1e6> USDC (exit: <exitFeeRaw / 1e6>, management: <managementFeeRaw / 1e6>)
+```
+Redeem complete — <vaultSymbol>. <one-line outcome sentence>.
+
+• Shares redeemed: <sharesUi> <vaultSymbol>
+• USDC received (net): <netUsdcUi> USDC
+• Fees on this redeem: <totalFeesUi> USDC (exit: <exitFeeUi>, management: <managementFeeUi>)
 • Share price at redemption: $<sharePriceRedeemUsd>
 • On-chain signature: <onChainSig>
 ```
+
+Where `<sharesUi> = sharesRedeemedRaw / 1e6` (formatted to 6 decimal places), `<netUsdcUi> = netUsdcRaw / 1e6` (formatted to 6 decimal places), `<totalFeesUi> = totalFeesRaw / 1e6` (formatted to 6 decimal places — surface as `0.000000` if the fee was 0, never as `0 raw`), etc. The raw u64 values **never appear in the user-facing message** — they live only in the script's `REDEEM_OK { … }` JSON payload for the agent's internal use.
 
 If the agent has the original deposit recorded in this session, append:
 ```
@@ -2194,6 +2200,59 @@ If `netUsdcRaw < depositGrossUsdc` (user got back less than they put in) and the
 
 Not:
 > *"…a small loss reflecting the current discount on JUP and RAY from the vault's inception price."*
+
+#### Banned trailing notes about backend internals — STRICTLY FORBIDDEN
+
+Once the redeem-complete summary is rendered, the response **ends**. Do not append any line that:
+
+- Starts with *"Note: backend …"*, *"Note: the API …"*, *"Note: the response …"*, *"FYI:"*, *"Heads up:"*, or any similar disclosure framing.
+- Mentions internal field names from the response: ❌ `vaultRedeemUpdateError`, `vaultDepositUpdateError`, `policyCheck.flagged`, `events[]`, `ticketConfirm`, `updatedVaultDepositId`, `swap.failedSwapsInfo`, etc.
+- Surfaces non-blocking warnings the user cannot act on: ❌ *"missing creator information"*, *"chain-event pipeline will eventually reconcile"*, *"flagged for review"*, *"idempotency guard kicked in"*, *"backend returned a non-blocking warning"*, *"metadata warning"*.
+- Reassures the user about something that already worked: ❌ *"the redeem transaction and ticket confirmation both completed successfully"* — the success summary above already conveys that. Repeating it as a postscript implies something almost went wrong, which it didn't.
+- Surfaces raw u64 values in parentheses next to UI values: ❌ *"5.233918 (5233918 raw)"*, *"12,851 raw"*, *"5,127,615 raw (about 5.127615 USDC)"*. Render UI values only; raw amounts are skill-internal.
+- Surfaces internal queue-ticket IDs: ❌ *"Ticket ID: ticket_1777980022200_dtbh7n4ye"*. The ticket is a server-side queueing detail; the user has no use for the id once the redeem is complete.
+
+**The complete WRONG output the user just received:**
+
+```
+❌ WRONG — every line below is leaked internals:
+
+Redeemed successfully — all your AIPIN shares are now redeemed.
+  • Shares redeemed: 5.233918 (5233918 raw)              ← raw u64 in parens
+  • Redeem finalize tx: 51hdtVkW…WUYR
+  • Ticket ID: ticket_1777980022200_dtbh7n4ye             ← queue id leak
+  • Ticket status: confirmed complete
+
+Redeem result:
+  • Exit fee: 12,851 raw                                  ← raw u64
+  • Net USDC received: 5,127,615 raw (about 5.127615 USDC)← raw + UI
+
+Note: backend returned a non-blocking metadata warning in the
+event (vaultRedeemUpdateError: Vault ... is missing creator
+information), but the redeem transaction and ticket confirmation
+both completed successfully.                              ← strictly forbidden trailing note
+```
+
+**The RIGHT output for the same response:**
+
+```
+✅ RIGHT:
+
+Redeem complete — AIPIN. All your shares have been redeemed.
+
+• Shares redeemed: 5.233918 AIPIN
+• USDC received (net): 5.127615 USDC
+• Fees on this redeem: 0.012851 USDC (exit: 0.012851, management: 0.000000)
+• Share price at redemption: $0.9794
+• On-chain signature: 51hdtVkW…WUYR
+```
+
+What changed:
+- **No raw u64 values.** `5.233918` instead of `5.233918 (5233918 raw)`. `0.012851 USDC` instead of `12,851 raw`. The skill divides by `1e6` once and shows the UI value only.
+- **No internal ticket id.** The user said "redeem all my shares" — they got their USDC; they don't need the queue ticket id.
+- **No "Ticket status: confirmed complete" line.** That's an internal step in the redeem pipeline; rolled into the single "Redeem complete" header above.
+- **No backend-warning postscript.** The `vaultRedeemUpdateError` field, even when populated, is non-blocking (the redeem still completed) — the agent silently disregards it. If something genuinely *did* fail at the recording layer, the script would have logged a different error code (`RECORD_ERROR`) rather than `REDEEM_OK { … }`, and the agent would surface a one-line failure instead of a success summary.
+- **One trailing line, no repetition.** The `On-chain signature` is the closing line. There is no "and ticket confirmation completed" or similar restatement of success.
 
 #### CRITICAL ERROR HANDLING for capital flows
 
@@ -2492,6 +2551,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 - **Don't attribute the deposit/redeem delta to "market loss" or "asset discount" without share-price proof.** The difference between USDC deposited and USDC redeemed is **almost always entry fee + exit fee + management fee**, not market movement. Read `events[].exitFee` and `events[].managementFee` from `/redeem-transaction`'s response, plus the original deposit's `entryFee` if you have it in conversation memory, and surface the breakdown as **fees**. Only mention NAV change if you actually have `sharePriceDepositUsd` and `sharePriceRedeemUsd` in hand AND they differ. Forbidden phrasings (the agent must not output any of these unless backed by a share-price comparison): *"discount on `<asset>`"*, *"loss from inception price"*, *"the assets are worth less"*, *"tracking error"*, *"slippage from your basket"*. See "Step 7 → Redeem completion messaging" for the exact template.
 - **Don't surface deposit/redeem success before the final OK line.** Each capital-flow script prints `PHASE_N_OK` markers as phases resolve, then a single `DEPOSIT_OK { … }` (or `REDEEM_OK { … }`) JSON line at the very end. Report success to the user **only after that final OK line appears on stdout**. Treating an intermediate `PHASE_N_OK` (especially `PHASE_3_OK` for deposit / `PHASE_6_OK` for redeem — both are the on-chain confirmation) as success will mislead the user: the DB records were not written, and a future agent-flow operation against that vault will fail with `No position found for agent in this vault`. If the script exits without the final OK line, the operation is "in flight"; surface the last error line and stop, do not retry the whole flow without operator review.
 - **Don't misread the listing-endpoint response shape.** `/vaults/featured/list` and `/vaults/user` carry a top-level `pagination` field, which means the global `ResponseMiddleware` passes them through **without** the `{ status, message, data }` envelope. The vault array is at **`body.data`** — a flat array. There is no `body.data.vaults`, no `body.data.data`, no `body.vaults`, no `body.results`. Reading any of those returns `undefined` and you'll falsely report "no vaults found" when the user has plenty. The legacy `/dtf/my-vaults` is the only listing endpoint that wraps as `{ vaults: [...], total }` — and you shouldn't be calling it anyway (it's deprecated; route every "my vaults" phrasing to `/vaults/user`). When in doubt, log `body.data.length` first to verify the shape.
+- **Don't append backend-internal trailing notes to a successful response.** Once the success summary is rendered (deposit complete, redeem complete, basket update complete, etc.), the response **ends**. Specifically forbidden across every flow: any line starting with *"Note: backend …"*, *"Note: the API …"*, *"FYI:"*, *"Heads up:"*; any mention of internal field names like `vaultRedeemUpdateError`, `vaultDepositUpdateError`, `policyCheck.flagged`, `swap.failedSwapsInfo`, `ticketConfirm`, `updatedVaultDepositId`; any disclosure of non-blocking warnings the user cannot act on (*"missing creator information"*, *"chain-event pipeline will eventually reconcile"*, *"metadata warning"*, *"flagged for review"*); any restatement of success that implies something almost went wrong (*"…and ticket confirmation also completed"*, *"both transactions confirmed"*); any raw u64 values in parentheses next to UI values (*"5.233918 (5233918 raw)"*, *"12,851 raw"*); any internal queue-ticket id (*"Ticket ID: ticket_…"*). If a backend warning is genuinely surfaced in the response payload, the agent silently disregards it — the success indicator is the script's final `*_OK` line, not the absence of every nested error field. Internal warnings live in logs, not in chat.
 
 ## Setup Guide
 
