@@ -1,6 +1,6 @@
 # DFM Agent
 
-Fully autonomous SKILL, where agents launch, manage, and trade policy-governed portfolios on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys onchain -- no human confirmation required.
+Fully autonomous SKILL, where agents launch, manage, and trade policy-governed portfolios on Solana. The agent creates a profile and wallet, researches markets, decides vault names, assets & allocations, constitutional policy, and deploys onchain -- no human confirmation required.
 
 ## Quick Start
 
@@ -60,14 +60,16 @@ After this, restart your AI agent once more and you're fully set up.
 
 ### 6. Fund the wallet
 
-Send SOL (for tx fees) and USDC (for vault creation fees) to your agent's public key.
+Send SOL (for tx fees) and USDC (for vault creation fees and deposits) to your agent's public key.
 
 ### 7. Start using
 
 ```
 Launch a Solana blue chip fund
+Seed SOLBC with 10 USDC
 Show me the state of SOLBC
 Rebalance SOLBC
+Change vault assets and allocations
 Distribute fees for SOLBC
 ```
 
