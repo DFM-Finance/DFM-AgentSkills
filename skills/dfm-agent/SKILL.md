@@ -1,6 +1,6 @@
 ---
 name: dfm-agent
-version: 2.1.1
+version: 2.1.2
 description: |
   Fully autonomous DTF vault management on Solana. The agent independently researches markets,
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
@@ -268,10 +268,29 @@ req.end();
    - If a keypair file exists at `AGENT_WALLET_PATH` (default `~/.dfm/agent-wallet.json`), load it and derive the public key.
    - Only if neither exists, generate a new keypair. See "Agent Wallet -- Keypair Generation" section below.
 
-3. Once the user provides the wallet address and the agent keypair exists, **auto-generate** the agent profile name and username:
-   - Name: generate a creative agent name (e.g. "Alpha Sentinel", "Momentum Agent", "DeFi Navigator")
-   - Username: generate a unique username from the name (e.g. "alpha_sentinel", "momentum_agent")
-   - **Don't worry about pre-checking uniqueness** — the `profile-launch.js` script auto-retries with a random 4-char hex suffix on any `409 "Username is already taken"` from the backend (up to 5 attempts). Just pass a sensible base name/username; the script handles collisions silently.
+3. Once the user provides the wallet address and the agent keypair exists, **auto-generate** the agent profile name and username. **Read the rules below carefully — past sessions have collapsed the name space onto a tiny attractor set ("Vault Navigator", "DeFi Navigator", "Alpha Sentinel") and that's actively bad UX.**
+
+   **Display-name rules (MANDATORY):**
+
+   - Pick a **two-word display name** drawn from genuinely different vocabularies on each launch. The single biggest failure mode: every model that reads a small example list anchors on those examples or near-variants. The fix is to seed from a wide, deliberately-mixed pool. Use the table below as a starting point — but **draw words you haven't seen in this conversation already**, and feel free to invent fresh combinations the table doesn't list.
+   - **Banned name stems (do NOT use as either word):** *Navigator*, *Sentinel*, *Agent*, *Bot*, *Vault*, *DeFi*, *Crypto*, *Solana*, *Token*. These have saturated the namespace from earlier example lists. If you reach for one of these, stop and pick from a different domain in the table.
+   - **Banned full names (already overused — never reuse):** *Vault Navigator*, *DeFi Navigator*, *Alpha Sentinel*, *Momentum Agent*, *Crypto Bot*.
+   - **Do NOT append hex / random suffixes / numbers / `_xx` markers to the display name.** That's only for usernames (the script handles it). The display name must be a clean two-word phrase. *"Vault Navigator A08E 🦞"* is wrong on every dimension — it leaks the retry suffix into a user-facing field. *"Sapphire Tide"* is right.
+   - **Use the agent wallet's first 3–4 characters as a creative seed** so different wallets reliably land on different themes. Example: agent wallet starts with `3UzV` → pick a name evocative of *3* / *U* / *V* (e.g. *Triton Vault*… no wait, *Vault* is banned, try *Triton Verse* or *Ultraviolet Drift*). This isn't a hashing scheme — it's a nudge to break the model's natural tendency to repeat.
+   - **Each launch must produce a distinct name.** If a previous run in this same conversation produced "Sapphire Tide", the next run picks something topologically distant: *Quasar Forge*, *Boreal Compass*, etc. — not "Sapphire Drift" or "Sapphire Reef".
+
+   **Seed pool to draw from (mix and match — combine one word from any column with one from another, or invent new ones in the same spirit):**
+
+   | Mythological / cosmic | Market / motion | Materials / nature | Abstract / concept |
+   |---|---|---|---|
+   | Aurora, Orion, Helios, Nyx, Atlas, Perseus, Vega, Lyra, Triton, Pegasus | Drift, Tide, Pulse, Surge, Cascade, Compass, Gradient, Vector, Ledger, Index | Obsidian, Quartz, Sapphire, Granite, Ember, Amber, Cinder, Boreal, Zephyr, Silt | Cipher, Lattice, Horizon, Atlas, Forge, Codex, Verse, Prism, Quasar, Echo |
+
+   Combinations like *Obsidian Pulse*, *Aurora Compass*, *Quasar Forge*, *Sapphire Tide*, *Boreal Index*, *Cinder Cipher*, *Pegasus Lattice* are all in-spirit. **Do not reuse any of those exact pairs verbatim** — they're examples, not a permitted list. Generate something adjacent.
+
+   **Username generation (separate problem — the script handles uniqueness):**
+
+   - Username = lowercase + underscore version of the display name (e.g. *Sapphire Tide* → `sapphire_tide`).
+   - Don't pre-suffix or pre-randomize the username either. The `profile-launch.js` script appends a 4-hex-char suffix on `409 "Username is already taken"` and retries up to 5 times automatically. **Pass the clean base — let the script handle collisions.** The display name is preserved across retries (only username changes), so the user sees "Sapphire Tide 🦞" even if the username had to retry as `sapphire_tide_a08e`.
 
 4. **Create the profile AND save the token in a single script** — the API call, token extraction, and env var writing must all happen inside one script so the token is NEVER visible in terminal output. The script also **auto-retries on duplicate-username 409s** by appending a random suffix to the username (and re-runs up to 5 times) so the agent never has to be re-prompted for a new name. Write a script file and execute it:
 
