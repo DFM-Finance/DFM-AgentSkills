@@ -1,6 +1,6 @@
 ---
 name: dfm-agent
-version: 2.2.0
+version: 2.2.1
 description: |
   Fully autonomous DTF vault management on Solana. The agent independently researches markets,
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
@@ -627,17 +627,27 @@ Allocation column shows percentages (`25%`), not `pct_bps` — this is user-faci
 
 Always include the rows above. Use `$<n>` with thousand separators for USD values, `<n>%` for percentages, plain integers for hour / count fields, and `yes` / `no` for booleans (never `true` / `false`). Skip a row only when the field genuinely doesn't apply (e.g. `Min stablecoin floor` with value `0%` can be omitted to reduce noise).
 
-**Table 3 — Whitelist buffer (only when `asset_mode` is `WHITELIST_ONLY` or `WHITELIST_BLACKLIST`):**
+**Table 3 — Whitelist roster (only when `asset_mode` is `WHITELIST_ONLY` or `WHITELIST_BLACKLIST`):**
 
-| Asset | Role | Notes |
-|---|---|---|
-| jitoSOL | Priority — launch | Highest LST TVL on Solana |
-| mSOL | Priority — launch | Marinade flagship LST |
-| bSOL | Priority — launch | BlazeStake LST |
-| INF | Priority — launch | Sanctum Infinity multi-LST |
-| hSOL | Buffer — reserve | Eligible for future rotation; not in launch |
-| jucySOL | Buffer — reserve | Eligible for future rotation; not in launch |
-| picoSOL | Buffer — reserve | Eligible for future rotation; not in launch |
+This table has FIVE columns — Asset, Role, Liquidity, 24h Volume, Floor check. The metrics columns are **mandatory**, not optional. They exist so the user can verify at a glance that every buffer mint actually passes the policy floors *before* the vault launches. Without them, stranded buffers are invisible until rotation time.
+
+| Asset | Role | Liquidity | 24h Volume | Floor check (vs $X liq / $Y vol) |
+|---|---|---|---|---|
+| jitoSOL | Priority — launch | $850,000,000 | $42,000,000 | ✓ pass |
+| mSOL | Priority — launch | $620,000,000 | $28,000,000 | ✓ pass |
+| bSOL | Priority — launch | $180,000,000 | $9,500,000 | ✓ pass |
+| INF | Priority — launch | $95,000,000 | $5,200,000 | ✓ pass (weakest priority — sets the floor at $47.5M / $2.6M) |
+| hSOL | Buffer — reserve | $62,000,000 | $3,400,000 | ✓ pass |
+| jucySOL | Buffer — reserve | $55,000,000 | $2,800,000 | ✓ pass |
+| picoSOL | Buffer — reserve | $48,000,000 | $2,650,000 | ✓ pass (margin: 1.0× — at the boundary; flag in Rationale) |
+
+**Hard rules for Table 3:**
+
+- Replace `$X liq / $Y vol` in the column header with the actual proposed `min_amm_liquidity_usd` and `min_24h_volume_usd` (e.g. `Floor check (vs $1,500,000 liq / $1,300,000 vol)`).
+- The Liquidity and 24h Volume values are the `/market-metrics` snapshot the agent already fetched. **If a snapshot is missing for any whitelisted mint, do NOT proceed to launch** — fetch it, or remove the mint from the whitelist. A blank cell in this table is a launch blocker.
+- Floor-check column: render `✓ pass` if `liquidity ≥ floor_liq AND volume ≥ floor_vol`, else `✗ FAIL — <reason>` (e.g. `✗ FAIL — liquidity $361K below $1.5M floor`). **A `✗ FAIL` row is a launch blocker.** The agent must drop the failing mint from the whitelist (preferred) or recompute the floors against `min(priority ∪ buffer)` and re-render the table. Do not present a proposal to the user with a `✗ FAIL` row — that's the bug we're trying to prevent.
+- For priority assets, also pass; if any priority asset fails its own floor the floors are simply too high — recompute.
+- Mention in the Rationale paragraph: which asset is the *weakest in the combined whitelist* (sets the floor), and the margin of the tightest buffer mint above that floor. If any buffer mint clears by less than 30%, call it out as a *catch-22 risk* (rule #5 of the Future-proofing checklist) — it'll be the first to fall below on a bad snapshot.
 
 Mark each whitelist mint as **Priority — launch** (will ship in `underlyingAssets`) or **Buffer — reserve** (whitelisted only so future `/update-assets-tx` rotations are policy-allowed). The user must be able to see at a glance that the launch basket is the priority subset, not the entire whitelist. Do **not** show full base58 mint addresses in this table unless the user explicitly asks; symbol + name is enough.
 
@@ -647,6 +657,9 @@ Mark each whitelist mint as **Priority — launch** (will ship in `underlyingAss
 - `min_amm_liquidity_usd: 179000` style key-value lines copied from the JSON.
 - Listing the whitelist as a flat array of mint addresses without distinguishing priority vs buffer.
 - Marketing-style bulleted "Why this works" sections that just paraphrase Table 2.
+- **Table 3 without Liquidity / 24h Volume / Floor check columns** — the three-column form (Asset, Role, Notes) hides stranded buffers and is the root cause of the un-rotatable-buffer bug. Always render the five-column form.
+- **Any `✗ FAIL` row in Table 3** in a presented proposal — it means the agent surfaced a stranded-buffer proposal to the user instead of fixing it. Either drop the failing mint or recompute the floors before rendering the proposal.
+- **Buffer mints listed without a `/market-metrics` snapshot.** If the snapshot wasn't fetched, the buffer is unverified; an unverified buffer must not appear in a proposal.
 
 Once the user picks a proposal, transition into Step 3 (`/policy/dry-run`) using the picked basket + policy verbatim — the dry-run uses the priority assets only (the buffer assets are part of the *policy*, not the basket).
 
@@ -935,7 +948,20 @@ The liquidity/volume floors above are **strategy ceilings, not target values**. 
 Always set:
 - `asset_mode`: choose based on the vault strategy:
   - `"OPEN"` — any asset can be added. No restrictions. Use for broad market / index / aggressive strategies.
-  - `"WHITELIST_ONLY"` — only assets in `asset_whitelist` are allowed. Use for curated funds (e.g. "only blue chips", "only LSTs"). **The whitelist must be a strict superset of the launch basket: priority assets (the 4/5/6 picks that go into `underlyingAssets`) PLUS a 3–4 asset buffer of category-eligible reserves** that the agent may rotate in later via `/update-assets-tx` policy updates. The buffer assets are NEVER part of the initial launch — only the priority assets ship in `underlyingAssets`. The buffer exists so future basket migrations don't require a (forbidden) policy expansion. Concrete sizing: priority count + buffer = at most `max_assets`; buffer must contain ≥3 mints that already pass the proposed `min_amm_liquidity_usd` / `min_24h_volume_usd` floors.
+  - `"WHITELIST_ONLY"` — only assets in `asset_whitelist` are allowed. Use for curated funds (e.g. "only blue chips", "only LSTs"). **The whitelist must be a strict superset of the launch basket: priority assets (the 4/5/6 picks that go into `underlyingAssets`) PLUS a 3–4 asset buffer of category-eligible reserves** that the agent may rotate in later via `/update-assets-tx` policy updates. The buffer assets are NEVER part of the initial launch — only the priority assets ship in `underlyingAssets`. The buffer exists so future basket migrations don't require a (forbidden) policy expansion.
+
+    **Critical: floors are calibrated against the weakest of the *combined* whitelist (priority ∪ buffer), NOT against the priority basket alone.** This is the most-bungled rule in the skill — past proposals have set floors at *priority_weakest × 0.5* and then included buffer mints whose liquidity is below that floor. Result: the buffer mint is policy-stranded the moment the vault launches. It is in `asset_whitelist` (so Rule 1 passes for it), but every attempted rotation that puts it in the basket fails Rule 2 / Rule 3 — it is *visible* but *un-rotatable*. The vault can only ever rotate among the priority assets it launched with.
+
+    **Correct flow (use this exactly):**
+    1. Pick priority assets; fetch `/market-metrics` for each.
+    2. Pick buffer candidates (3–4 mints from the same category); fetch `/market-metrics` for each. **Do not skip this fetch.** A buffer mint without a snapshot cannot be validated and must not be added to the whitelist.
+    3. Compute `weakest_liquidity = min(liquidity_usd over priority ∪ buffer)` and `weakest_volume = min(volume_24h_usd over priority ∪ buffer)`. Note "over priority ∪ buffer" — both groups participate.
+    4. Set `min_amm_liquidity_usd = floor(weakest_liquidity × 0.5)` and `min_24h_volume_usd = floor(weakest_volume × 0.5)`, rounded down to a clean number.
+    5. **Verify** every buffer mint clears the resulting floors (they should, by construction — if any fails, the math was wrong; recompute).
+
+    **If a buffer candidate's snapshot is far weaker than the priority assets** (so step 3 would push the floors uselessly low), drop the candidate from the buffer instead of dragging the floors down. The buffer is only useful if its members can actually be rotated in — a "buffer" mint that drags the floor below half of the priority weakest is a Trojan horse: it signals depth the vault doesn't have, and dilutes the floors so much that *future* candidates (the ones the agent might want to add later via policy updates) become too weak to gate against.
+
+    **Concrete sizing:** priority count + buffer count ≤ `max_assets`. Buffer count ≥ 3 (so there are real rotation options). Every whitelisted mint must clear the proposed `min_amm_liquidity_usd` and `min_24h_volume_usd` floors with the same 0.5× safety buffer the priority assets enjoy.
   - `"OPEN_BLACKLIST"` — all assets allowed except those in `asset_blacklist`. Use when you want to exclude specific risky assets. Set `asset_blacklist` to the mint addresses to exclude.
   - `"WHITELIST_BLACKLIST"` — only whitelisted assets allowed, with additional blacklist exclusions. Use for strict curated funds with explicit exclusions. Apply the **same priority + 3–4 buffer rule** as `WHITELIST_ONLY` to `asset_whitelist`; use `asset_blacklist` only for explicit category exclusions. Launch ships priority assets only.
   - **Decision rule:** If the user asks for a specific category fund (e.g. "LST fund", "blue chip only", "top 5 DeFi tokens"), use `WHITELIST_ONLY`. If the user asks for broad exposure, use `OPEN`. If the user says "exclude meme coins" or similar, use `OPEN_BLACKLIST`.
@@ -953,9 +979,10 @@ The agent must mentally tick each of these against the proposed `policy` + baske
 
 1. **Asset-count headroom** — Is `max_assets ≥ launch_basket_count + 2` AND `min_assets ≤ launch_basket_count − 1`? If no → widen the bounds.
 2. **Single-swap feasibility** — Is `max_rebalance_pct ≥ 2 × max_asset_pct`? Equivalent question: if I had to replace the largest-weight asset tomorrow, would the resulting allocation movement fit under `max_rebalance_pct`? If no → raise `max_rebalance_pct` (preferred) or lower `max_asset_pct`.
-3. **Liquidity/volume buffer** — Is `min_amm_liquidity_usd ≤ weakest_asset_snapshot.liquidity_usd × 0.5` AND `min_24h_volume_usd ≤ weakest_asset_snapshot.volume_24h_usd × 0.5`? If no → halve the floors. Snapshots fluctuate; the floor must absorb a 50% intraday dip without locking the asset.
+3. **Liquidity/volume buffer (priority assets)** — For every asset in the *launch basket* (priority): is `min_amm_liquidity_usd ≤ asset.liquidity_usd × 0.5` AND `min_24h_volume_usd ≤ asset.volume_24h_usd × 0.5`? If no → halve the floors. Snapshots fluctuate; the floor must absorb a 50% intraday dip without locking the asset.
 4. **Removability** — For every asset currently in the basket, simulate a basket without that asset: does the simulated basket still satisfy `min_assets`, `max_asset_pct`, and `min_asset_pct`? If any asset is non-removable, the vault is one bad volume snapshot away from being permanently stuck.
 5. **Catch-22 defence** — If any included asset's `/market-metrics` snapshot is within 30% of the proposed `min_24h_volume_usd` or `min_amm_liquidity_usd`, **lower the floor further or swap the asset**. An asset that hovers near the floor will eventually fall below it, and then no intermediate basket containing it can pass the volume gate, blocking the migration entirely.
+6. **Buffer rotatability (WHITELIST modes only)** — For every mint in `asset_whitelist` that is NOT in the launch basket (i.e. every Buffer — reserve mint): does that mint's `/market-metrics` snapshot pass the proposed `min_amm_liquidity_usd` and `min_24h_volume_usd` floors *with the same 0.5× margin the priority assets get*? If any buffer mint fails — even by a single dollar of volume — it is **policy-stranded**: it sits in the whitelist looking rotatable but Rule 2 / Rule 3 will block every `/update-assets-tx` that tries to bring it into the basket. **Drop the failing buffer mint** (preferred — keeps strong floors), or, only if the agent really needs that specific mint as a future option, lower both floors so the mint clears with the 0.5× margin (this also lowers the bar for *every* future buffer candidate, so weigh it carefully). Past field failures from this exact mistake: a Solana-DeFi vault launched with a $1.5M liquidity floor and ORCA ($361K) / RENDER ($540K) in the buffer — both un-rotatable from day one. A meme-beta vault launched with a $70K volume floor and DRIFT ($49K) in the buffer — un-rotatable.
 
 If the user's stated strategy (e.g. "exactly 3 concentrated picks") seems to want a rigid policy, do not encode rigidity by tightening the policy bounds. The strategy *intent* belongs in the basket and `notes`; the policy *bounds* belong wide enough to keep the vault manageable.
 
@@ -3054,6 +3081,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **"Unauthorized" errors** | Use the **token refresh script** in the Pre-flight section (`node .claude/refresh-token.js`). The script derives the agent wallet address from `DFM_AGENT_KEYPAIR` automatically — no CLI args required. Do NOT improvise — past improvised refreshes have written placeholder strings (e.g. `+token+`) into `settings.json`. If you see `+token+` or other obviously-bogus values in `.claude/settings.json`, delete the `DFM_AUTH_TOKEN` entry and re-run the refresh script. |
 | **`/launch-dtf` returns 400 with `violations[]`** | Policy validation failed — nothing landed on-chain. Read every violation in the array and fix in one pass (adjust `policy` thresholds, swap assets, or rebalance `pct_bps`). Run `/policy/dry-run` to iterate cheaply. Only retry `/launch-dtf` once dry-run is clean. |
 | **`/policy/dry-run` keeps returning the same violation** | Likely a mismatch between the `min_amm_liquidity_usd` / `min_24h_volume_usd` in the policy and the `/market-metrics` numbers for the weakest included asset. Either lower the threshold below the asset's real number, or drop/swap the asset. Do NOT set thresholds above what an included asset actually has — the asset will be perma-flagged. |
+| **`/update-assets-tx` returns `rule2MinAmmLiquidity` / `rule3Min24hVolume` for a mint that is in the vault's `asset_whitelist`** | **Stranded buffer asset.** The mint passed Rule 1 (whitelist) but fails Rule 2 / Rule 3 because its `/market-metrics` snapshot is below the policy floors that were set at launch. Root cause: the launch-time agent set the floors against the priority assets only and added this mint to the buffer without re-checking it. **The vault cannot rotate to this mint, period** — policy is fixed for the vault's life. Surface the diagnosis to the user (which mint, observed liquidity / volume vs. required floors), drop the mint from the migration plan, and pick a different rotation candidate that does clear the floors. To prevent this on *future* launches, the proposal-generation flow must use the five-column Table 3 (with Floor check column) and run the Future-proofing checklist rule #6 (Buffer rotatability) before presenting the proposal. |
 | **`/market-metrics` returns null values for some assets** | Transient Jupiter fetch miss. Retry the call; the service caches per mint so the second call usually succeeds. If persistent, drop the asset — the policy engine can't validate Rule 2/3 for it either. |
 | **"Keypair file not found"** | Re-generate wallet (Step 4). Check: `ls -la $AGENT_WALLET_PATH` |
 | **"No signer keypair" / empty DFM_AGENT_KEYPAIR** | `DFM_AGENT_KEYPAIR` not set. Re-export (Step 5). Verify: `echo $DFM_AGENT_KEYPAIR` |
