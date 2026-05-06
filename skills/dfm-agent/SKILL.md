@@ -1,6 +1,6 @@
 ---
 name: dfm-agent
-version: 2.1.2
+version: 2.2.0
 description: |
   Fully autonomous DTF vault management on Solana. The agent independently researches markets,
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
@@ -448,11 +448,51 @@ Use this skill when:
 - The user asks to research tokens/markets and create a fund
 - The user wants to check vault state, policy, or rebalancing status
 - The user asks to rebalance a vault or distribute fees
+- The user asks for **market data on a specific asset** — *"check SOL liquidity"*, *"what's BONK's 24h volume"*, *"price of JUP"*, *"how many holders does ORCA have"*, *"is this asset deep enough to launch"* — route to `GET /market-metrics` (see "Prompt routing" below). The endpoint is the same Jupiter pipeline the policy engine queries, so numbers match exactly what would be enforced at launch / rebalance time.
+- The user asks to **monitor a basket / watchlist of assets** — *"keep an eye on [SOL, JUP, BONK]"*, *"are any of these dropping below the floor"*, *"monitor liquidity drift on my basket"* — route to `GET /market-metrics` with a multi-asset query and render a table. (For ongoing polling at a cadence, the agent runs the call on demand each turn — there is no server-side subscription.)
 - The user asks to **deposit USDC into a vault** or **redeem vault tokens** (capital flows are agent-bound — see "Step 7: Capital Flows")
 - The user asks **"how many shares do I hold in `<vault>`?"** or **"what's my position in `<vault>`?"** — read the on-chain ATA balance via `GET /vaults/:symbol/shares`. Also the right pre-flight call when the user says *"redeem all my `<vault>`"*.
 - The user asks for **"all DTFs on the platform"** / **"every vault on DFM"** / **"what DTFs are available"** — run the **platform-wide listing flow** (Step 5: Manage → "Listing all platform DTFs"): two vault-type fetches across all pages with featured/non-featured enrichment, merged into one combined table. **This is different from "my vaults"** — do not route platform-wide phrasings to `/vaults/user`; that endpoint is user-scoped.
 - The user asks for a **"list" of platform DTFs with details** — *"give me list of all DTFs"*, *"give me detailed data of all vaults"*, *"list every vault with full info"* — run the same platform-wide listing flow but render **detailed mode** (Step 5: Manage → "Detailed listing mode"): summary table at top, then per-vault detail blocks (overview + composition) for every vault. Default to detailed mode whenever the user says "list" with any "details / full / everything" qualifier; default to the compact summary table for bare "show me" / "browse" / "what's available" phrasings.
 - The user needs to set up agent auth (wallet generation, token management)
+
+## Prompt routing — intent → endpoint
+
+Before doing any work, classify the user's prompt against the table below. **Pick exactly one row and execute its workflow** — don't fan out to multiple tools, and don't default to `WebSearch` for queries that have a first-party API answer. The numbers the policy engine enforces come from `/market-metrics`, not from aggregators, so any market-shaped question about a specific asset must hit the API rather than the open web — otherwise the agent quotes a number the platform won't enforce against.
+
+| User prompt shape | Primary tool | Secondary / fallback | Output format |
+|---|---|---|---|
+| *"price / liquidity / 24h volume / holders of \<asset>"*, *"check market data for SOL"*, *"is BONK deep enough to launch"*, *"show me metrics for [SOL, JUP, BONK]"* | `GET /market-metrics?symbols=...&names=...&mints=...` | None — this is the canonical asset-metrics path | Markdown table with the column schema in Step 1: Research (Symbol, Name, Price, Liquidity, 24h Volume, Holders) |
+| *"monitor my basket"*, *"watch these assets"*, *"flag anything dropping below 500k liquidity"*, *"are any of these about to fall below the floor"* | `GET /market-metrics` (multi-asset) | None for the snapshot. If the user asks for a *recurring* watch, surface that the agent runs the check each turn — no server-side subscription. | Markdown table with one row per asset; if the user gave a threshold, append a one-line "⚠ X below \<threshold>" summary below the table |
+| *"market sentiment"*, *"what's happening with \<asset>"*, *"news / catalysts / narrative around X"*, *"why is the market down today"*, *"trending Solana tokens this week"* | `WebSearch` + `WebFetch` | `/market-metrics` only as a follow-up when the user pivots to specific numbers | Short narrative answer; surface 2–4 cited sources if the user is making a directional decision |
+| *"how is my vault \<symbol>"*, *"show me state / portfolio / NAV / share price of \<symbol>"*, *"my position in \<symbol>"* | `GET /dtf/:symbol/state` | `GET /vaults/:symbol/shares` for raw share-balance reads | Multi-section markdown tables per Step 5: Manage (vault header table + portfolio table + holdings table + history) |
+| *"should I rebalance \<symbol>"*, *"is \<symbol> due for rebalance"*, *"check rebalance readiness"* | `GET /dtf/:symbol/rebalance/check` | `/dtf/:symbol/state` for context only if the user asked for it | Plain-English readiness verdict + suggestions table from `suggestion.suggestedActions[]` |
+| *"list my vaults"*, *"my DTFs"*, *"vaults I created"*, *"my portfolio across vaults"* | `GET /vaults/user?vaultType=dtf` and `GET /vaults/user?vaultType=yield_dtf` | None | Combined markdown table per Step 5: Manage |
+| *"all DTFs on the platform"*, *"every vault on DFM"*, *"browse featured"*, *"what's curated"* | `GET /vaults/featured/list` (paginated) ± `/vaults/user` for cross-listing | None | Combined markdown table — see Step 5 → "Listing all platform DTFs" |
+| *"draft / propose / suggest \<n> DTFs"*, *"give me proposals"*, *"vault ideas"* | `WebSearch` + `WebFetch` for asset discovery, then `GET /market-metrics` to validate each candidate's liquidity / volume | `POST /policy/dry-run` once the user picks one | Three-table proposal format per Step 2: Design → "Proposal output format" (basket, policy, whitelist buffer) |
+| *"launch / create / deploy a DTF"* (with or without a stated theme) | Full autonomous launch flow — Steps 1–4 below | None | Conversational status updates + final success line per Step 4 |
+| *"deposit \<n> USDC"*, *"redeem \<n> shares"*, *"buy / sell \<symbol>"* | Capital-flow scripts in Step 7 | None | Scripted phase markers + final `DEPOSIT_OK` / `REDEEM_OK` summary table |
+
+### Real-time monitoring — what's actually possible
+
+There is **no server-side subscription / streaming endpoint**. "Real-time" in this skill means: the agent calls `/market-metrics` (and/or `/dtf/:symbol/state`) **on each turn the user asks**, and renders the snapshot. If the user says *"keep monitoring SOL liquidity for the next hour and tell me if it drops below 600M"*, the agent should:
+
+1. Run the snapshot now and surface the current value.
+2. Tell the user plainly that the agent only checks when invoked — there is no background polling. Suggest the user re-asks at their preferred cadence (e.g. *"ask me again in 15 minutes"*).
+3. **Don't fabricate continuous monitoring.** Phrases like *"I'll watch this for you"*, *"I'll alert you if it drops"*, *"polling now"* are banned — they imply background work that does not exist.
+
+For genuinely scheduled checks the user can wire up a `/schedule` skill invocation externally; that is outside this skill's scope and must be surfaced as such if asked.
+
+### What `/market-metrics` does and doesn't carry
+
+| Field returned | Use it for | Don't use it for |
+|---|---|---|
+| `liquidity_usd`, `volume_24h_usd` | Policy calibration, depth checks, "is this asset launchable", monitoring drift | Long-term trend analysis (no historical series) |
+| `price_usd` | Current spot reference, sanity-checking aggregator data | Charts, candlesticks, % change over time |
+| `holder_count` | Distribution heuristics, meme / new-token vetting | Wallet identity, whale tracking |
+| `policyRelevant.{liquidity_usd, volume_24h_usd}` | The numbers the evaluator will compare against | Anything else — it's a duplicate of the top-level fields |
+
+The endpoint is **per-asset snapshot only**. For trends, sentiment, news, or anything narrative, route to `WebSearch` / `WebFetch` per the table above.
 
 ## Autonomous DTF Launch -- How It Works
 
