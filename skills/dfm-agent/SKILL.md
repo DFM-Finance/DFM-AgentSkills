@@ -1,6 +1,6 @@
 ---
 name: dfm-agent
-version: 2.0.0
+version: 2.1.1
 description: |
   Fully autonomous DTF vault management on Solana. The agent independently researches markets,
   decides vault names/symbols/allocations/policies, and deploys on-chain in a two-step flow —
@@ -535,6 +535,62 @@ Based on your research, autonomously decide:
 - **Description** -- strategy summary
 - **Launch media fields** -- for DTF launch payloads, set `logoUrl`, `bannerUrl`, and `metadataUri` to empty strings.
 
+#### Proposal output format (when the user asks for DTF *proposals*, not direct launch)
+
+When the user asks for **proposals / options / candidate vaults** to consider before launching (phrasings like *"give me some DTF proposals"*, *"suggest a few baskets"*, *"what could we launch"*, *"draft 3 vault ideas"*), the agent must present each proposal in a **strict markdown-table format** — never raw JSON. JSON dumps of the `policy` object are **explicitly banned** in proposal output: they leak field names the user does not need to read, push useful information off-screen, and look like API debug dumps. The user has already told the agent that JSON output for proposals is "unnecessary and inappropriate" — do not regress.
+
+For each proposal, render exactly **three tables** preceded by a one-line proposal title (e.g. `### 1) Solana LST Yield Basket — curated LST exposure`). Optionally finish each proposal with a 1–2 sentence *Rationale* paragraph summarising why the basket + policy combination passes the policy engine. Nothing else — no JSON code fences, no bullet dumps of policy fields, no "Why this works" lists redundant with the rationale paragraph.
+
+**Table 1 — Basket allocation (priority assets only, even when whitelist mode includes a buffer):**
+
+| Symbol | Allocation | Why it's in the basket |
+|---|---|---|
+| SOL | 25% | Deepest liquidity / volume on Solana — anchors the basket |
+| JUP | 15% | DEX aggregator, top-3 spot volume |
+| ... | ... | ... |
+
+Allocation column shows percentages (`25%`), not `pct_bps` — this is user-facing. The percentages must sum to 100% and mirror what will go into `underlyingAssets[].mintBps` at launch.
+
+**Table 2 — Policy parameters (the values that will ship inside the `policy` sub-object of `/launch-dtf`):**
+
+| Parameter | Value | What it controls |
+|---|---|---|
+| Asset mode | `WHITELIST_ONLY` | Only listed mints can ever enter the basket |
+| Min AMM liquidity | $180,000 | 50% buffer below weakest included asset's snapshot |
+| Min 24h volume | $1,200,000 | 50% buffer below weakest included asset's snapshot |
+| Min / max assets | 4 / 10 | Headroom of ±2 around the launch basket size |
+| Min / max asset weight | 5% / 40% | No single position can exceed 40%; floor of 5% prevents dust positions |
+| Max rebalance per tx | 60% | Allows full asset swap (≥ 2× max asset weight) |
+| Min rebalance interval | 12 h | Conservative cadence for a yield-style fund |
+| Max rebalances / day · week | 1 · 5 | Limits churn |
+| Launch blackout | 24 h | No rebalance in the first 24 h post-launch |
+| Fee locked | yes | Management fee committed at launch |
+
+Always include the rows above. Use `$<n>` with thousand separators for USD values, `<n>%` for percentages, plain integers for hour / count fields, and `yes` / `no` for booleans (never `true` / `false`). Skip a row only when the field genuinely doesn't apply (e.g. `Min stablecoin floor` with value `0%` can be omitted to reduce noise).
+
+**Table 3 — Whitelist buffer (only when `asset_mode` is `WHITELIST_ONLY` or `WHITELIST_BLACKLIST`):**
+
+| Asset | Role | Notes |
+|---|---|---|
+| jitoSOL | Priority — launch | Highest LST TVL on Solana |
+| mSOL | Priority — launch | Marinade flagship LST |
+| bSOL | Priority — launch | BlazeStake LST |
+| INF | Priority — launch | Sanctum Infinity multi-LST |
+| hSOL | Buffer — reserve | Eligible for future rotation; not in launch |
+| jucySOL | Buffer — reserve | Eligible for future rotation; not in launch |
+| picoSOL | Buffer — reserve | Eligible for future rotation; not in launch |
+
+Mark each whitelist mint as **Priority — launch** (will ship in `underlyingAssets`) or **Buffer — reserve** (whitelisted only so future `/update-assets-tx` rotations are policy-allowed). The user must be able to see at a glance that the launch basket is the priority subset, not the entire whitelist. Do **not** show full base58 mint addresses in this table unless the user explicitly asks; symbol + name is enough.
+
+**Banned in proposal output** (every item observed in past bad output):
+- Raw JSON code fences for the policy object — `{ "asset_mode": "...", ... }`. The Table 2 row schema replaces it entirely.
+- `pct_bps` integers in user-facing columns (use `%`).
+- `min_amm_liquidity_usd: 179000` style key-value lines copied from the JSON.
+- Listing the whitelist as a flat array of mint addresses without distinguishing priority vs buffer.
+- Marketing-style bulleted "Why this works" sections that just paraphrase Table 2.
+
+Once the user picks a proposal, transition into Step 3 (`/policy/dry-run`) using the picked basket + policy verbatim — the dry-run uses the priority assets only (the buffer assets are part of the *policy*, not the basket).
+
 ### Step 3: Validate (Pre-flight dry-run)
 
 Before calling `/launch-dtf`, run the proposed basket + policy through `POST /policy/dry-run`. This is **free** (no DB write, no on-chain cost) and returns every violation at once so the agent can fix them in one pass. **Loop until `ok: true` or `violations: []`.**
@@ -639,30 +695,45 @@ Send `POST {DFM_API_URL}/api/v2/agent/launch-dtf` with the vault creation payloa
 
 **Headroom rationale (do not copy values blindly):** the launch-time policy must allow the *future* basket migrations the agent will need to perform. See "Future-proofing checklist" below — the agent must run that checklist against the proposed policy *before* sending `/launch-dtf`.
 
-Successful response:
+Successful response (wrapped by the global `ResponseMiddleware` envelope — every successful agent endpoint without a top-level `pagination` field gets this wrapping):
 ```json
 {
-  "onChain": {
-    "transaction": "base64-encoded-unsigned-versioned-transaction...",
-    "vaultIndex": 42,
-    "vaultPda": "7Xk...def",
-    "vaultMintPda": "9Rm...ghi"
-  },
-  "policyId": "665c..."
+  "status": "success",
+  "message": "OK",
+  "data": {
+    "onChain": {
+      "transaction": "base64-encoded-unsigned-versioned-transaction...",
+      "vaultIndex": 42,
+      "vaultPda": "7Xk...def",
+      "vaultMintPda": "9Rm...ghi"
+    },
+    "policyId": "665c..."
+  }
 }
 ```
 
-Policy-violation response (400) — **same shape as dry-run**:
+**Read the unsigned tx at `body.data.onChain.transaction`, not `body.onChain.transaction`.** The same `body.data.*` access applies to `vaultIndex`, `vaultPda`, `vaultMintPda`, and `policyId`. Reading `body.onChain.transaction` returns `undefined` and the agent will report the launch as broken when the response is actually fine — the misread is the only thing broken.
+
+Policy-violation response (400) — wrapped by the `GlobalExceptionFilter`. The thrown `BadRequestException` body is parked under `error`; the `violations[]` array lives at **`body.error.violations`**, not `body.violations`:
 ```json
 {
   "statusCode": 400,
-  "message": "Policy validation failed",
-  "ok": false,
-  "violations": [
-    { "violationCode": "rule2MinAmmLiquidity", "message": "...", "details": {...} }
-  ]
+  "path": "/api/v2/agent/launch-dtf",
+  "timestamp": "2026-05-06T12:34:56.789Z",
+  "error": {
+    "message": "Proposed basket violates the supplied constitutional policy. Adjust the policy or the basket and try again.",
+    "ok": false,
+    "violationCode": "rule2MinAmmLiquidity",
+    "violations": [
+      { "violationCode": "rule2MinAmmLiquidity", "message": "...", "details": {...} }
+    ],
+    "error": "Bad Request",
+    "statusCode": 400
+  }
 }
 ```
+
+**Reading violations:** `body.error.violations` — same per-entry shape as `/policy/dry-run`'s `policyCheck.violations` (so the violation-code translation table is reusable). Treat `body.violations` as `undefined`; that path is the unwrapped dry-run shape, not the exception envelope.
 
 #### 4b. Sign and submit the transaction on-chain
 
@@ -675,8 +746,11 @@ const bs58 = require("bs58").default || require("bs58");
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
 const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
 
-// Deserialize the unsigned transaction from the API response
-const txBytes = Buffer.from(response.onChain.transaction, "base64");
+// Deserialize the unsigned transaction from the API response.
+// `response` here is the parsed JSON body — the tx lives under data.onChain
+// because the global ResponseMiddleware wraps the controller return value
+// as { status, message, data: { onChain, policyId } }.
+const txBytes = Buffer.from(response.data.onChain.transaction, "base64");
 const tx = VersionedTransaction.deserialize(txBytes);
 
 // Sign with the agent's keypair
@@ -727,7 +801,7 @@ Successful response:
 }
 ```
 
-**Example: WHITELIST mode (for curated LST yield fund)** — the policy fields move to `/launch-dtf`. `/dtf-create` still only carries metadata:
+**Example: WHITELIST mode (for curated LST yield fund)** — the policy fields move to `/launch-dtf`. `/dtf-create` still only carries metadata. **Notice the asymmetry between `underlyingAssets` (3 priority assets that ship at launch) and `asset_whitelist` (6 mints — 3 priority + 3 buffer reserved for future `/update-assets-tx` rotations).** The buffer mints are policy-eligible but never part of the launch basket. See "WHITELIST_ONLY" in the Policy field decision guide for the full priority + buffer rule.
 
 Step 4a `/launch-dtf` body (policy for curated LST fund):
 ```json
@@ -747,7 +821,10 @@ Step 4a `/launch-dtf` body (policy for curated LST fund):
     "asset_whitelist": [
       "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
       "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",
-      "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1"
+      "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",
+      "5oVNBeEEQvYi1cX3ir8Dx5n1P7pdxydbGF2X4TxVusJm",
+      "he1iusmfkpAdwvxLNGV8Y1iSbj4rUy6yMhEA3fotn9A",
+      "BqYCcAd1ZtrtdwoAxmqLtXMSrW1DHPV6LWLjB2TQrtyT"
     ],
     "asset_blacklist": [],
     "min_amm_liquidity_usd": 500000,
@@ -763,7 +840,7 @@ Step 4a `/launch-dtf` body (policy for curated LST fund):
     "max_rebalances_per_week": 5,
     "launch_blackout_hours": 24,
     "fee_locked": true,
-    "notes": "Whitelisted LST-only yield fund"
+    "notes": "Whitelisted LST-only yield fund (3 priority + 3 buffer mints)"
   }
 }
 ```
@@ -799,9 +876,9 @@ The liquidity/volume floors above are **strategy ceilings, not target values**. 
 Always set:
 - `asset_mode`: choose based on the vault strategy:
   - `"OPEN"` — any asset can be added. No restrictions. Use for broad market / index / aggressive strategies.
-  - `"WHITELIST_ONLY"` — only assets in `asset_whitelist` are allowed. Use for curated funds (e.g. "only blue chips", "only LSTs"). Set `asset_whitelist` to the mint addresses of the selected assets.
+  - `"WHITELIST_ONLY"` — only assets in `asset_whitelist` are allowed. Use for curated funds (e.g. "only blue chips", "only LSTs"). **The whitelist must be a strict superset of the launch basket: priority assets (the 4/5/6 picks that go into `underlyingAssets`) PLUS a 3–4 asset buffer of category-eligible reserves** that the agent may rotate in later via `/update-assets-tx` policy updates. The buffer assets are NEVER part of the initial launch — only the priority assets ship in `underlyingAssets`. The buffer exists so future basket migrations don't require a (forbidden) policy expansion. Concrete sizing: priority count + buffer = at most `max_assets`; buffer must contain ≥3 mints that already pass the proposed `min_amm_liquidity_usd` / `min_24h_volume_usd` floors.
   - `"OPEN_BLACKLIST"` — all assets allowed except those in `asset_blacklist`. Use when you want to exclude specific risky assets. Set `asset_blacklist` to the mint addresses to exclude.
-  - `"WHITELIST_BLACKLIST"` — only whitelisted assets allowed, with additional blacklist exclusions. Use for strict curated funds with explicit exclusions. Set both `asset_whitelist` and `asset_blacklist`.
+  - `"WHITELIST_BLACKLIST"` — only whitelisted assets allowed, with additional blacklist exclusions. Use for strict curated funds with explicit exclusions. Apply the **same priority + 3–4 buffer rule** as `WHITELIST_ONLY` to `asset_whitelist`; use `asset_blacklist` only for explicit category exclusions. Launch ships priority assets only.
   - **Decision rule:** If the user asks for a specific category fund (e.g. "LST fund", "blue chip only", "top 5 DeFi tokens"), use `WHITELIST_ONLY`. If the user asks for broad exposure, use `OPEN`. If the user says "exclude meme coins" or similar, use `OPEN_BLACKLIST`.
 - `min_assets`: **`max(1, launch_basket_count − 1)`**. Never set `min_assets == launch_basket_count` — that traps the basket at exactly that size, with no room to drop a single asset on a future migration. (TOP3S launched with `min_assets: 3, max_assets: 3` — locked forever to a 3-asset basket and any single-asset swap exceeds the per-update cap.)
 - `max_assets`: **`min(12, launch_basket_count + 3)`**, with `12` as the hard ceiling. Always leave room to grow the basket by 2–3 assets.
@@ -865,10 +942,14 @@ async function signAndSendTransaction(
   return signature;
 }
 
-// Usage:
+// Usage — note the `data.onChain.transaction` path. The /launch-dtf and /distribute-fees
+// responses are wrapped by the global ResponseMiddleware as { status, message, data: { ... } },
+// so the unsigned tx string lives under `body.data.onChain.transaction`. Reading
+// `body.onChain.transaction` returns undefined and the call to Buffer.from will throw
+// "first argument must be of type string" — that error is the misread, not a backend bug.
 const keypair = Keypair.fromSecretKey(bs58.decode(process.env.DFM_AGENT_KEYPAIR!));
 const connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com");
-const sig = await signAndSendTransaction(response.onChain.transaction, keypair, connection);
+const sig = await signAndSendTransaction(response.data.onChain.transaction, keypair, connection);
 ```
 
 **CRITICAL ERROR HANDLING RULES for vault deployment:**

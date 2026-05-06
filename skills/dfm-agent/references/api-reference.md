@@ -23,6 +23,33 @@ Endpoints marked **[Public]** bypass authentication.
 | Revocable | Yes -- via dashboard or `POST /token/revoke` |
 | Request identity | Guard decodes JWT and attaches `agentPayload`, `agentId`, `userId` to request |
 
+### Global response envelope (READ FIRST)
+
+Every successful response goes through `ResponseMiddleware` and is wrapped as:
+
+```json
+{ "status": "success", "message": "OK", "data": <controller return value> }
+```
+
+Two exceptions to the wrapping:
+- **Already-wrapped responses** (the controller returned an object that already has `status` + `data`) — passed through as-is.
+- **Paginated list endpoints** (`/vaults/user`, `/vaults/featured/list`) — the controller returns `{ data: [...], pagination: {...} }` and the middleware sees the top-level `pagination` field and skips wrapping. The vault array is at `body.data` (not `body.data.data`).
+
+Every other agent endpoint — including `/launch-dtf`, `/dtf-create`, `/policy/dry-run`, `/dtf/:symbol/state`, `/market-metrics`, `/distribute-fees`, `/rebalance/check`, `/rebalance` — is wrapped. **The controller's documented return shape lives at `body.data`, not on `body` directly.** Reading `body.<field>` instead of `body.data.<field>` returns `undefined` and the agent will report the call as broken when the response is actually fine.
+
+Failed responses go through `GlobalExceptionFilter` and have a different shape:
+
+```json
+{
+  "statusCode": 400,
+  "path": "/api/v2/agent/<endpoint>",
+  "timestamp": "<iso>",
+  "error": <HttpException response — usually { message, ...extra fields }>
+}
+```
+
+So a 400 with `violations[]` thrown by `/launch-dtf` exposes its violations array at `body.error.violations`, not `body.violations`.
+
 ### On-chain signing
 
 Endpoints that build on-chain transactions (`launch-dtf`, `distribute-fees`) return unsigned base64-encoded `VersionedTransaction`s. The agent signs them locally using the keypair from `DFM_AGENT_KEYPAIR` and submits on-chain. **No secret keys are sent to the backend.**
@@ -215,46 +242,67 @@ Builds an unsigned vault creation transaction AND commits the constitutional pol
 - Each asset's liquidity/volume (per Jupiter) must meet `policy.min_amm_liquidity_usd` / `policy.min_24h_volume_usd`. Use `GET /market-metrics` (Section 13) to check these numbers before submitting.
 
 **Response (201) - Success:**
+
+The controller returns `{ onChain, policyId }`, but the global `ResponseMiddleware` wraps every successful response (except endpoints that already carry a top-level `pagination` field) into `{ status, message, data }`. The wire shape the agent must parse is:
+
 ```json
 {
-  "onChain": {
-    "transaction": "base64-encoded-unsigned-versioned-transaction...",
-    "vaultIndex": 42,
-    "vaultPda": "7Xk...def",
-    "vaultMintPda": "9Rm...ghi"
-  },
-  "policyId": "665c..."
+  "status": "success",
+  "message": "OK",
+  "data": {
+    "onChain": {
+      "transaction": "base64-encoded-unsigned-versioned-transaction...",
+      "vaultIndex": 42,
+      "vaultPda": "7Xk...def",
+      "vaultMintPda": "9Rm...ghi"
+    },
+    "policyId": "665c..."
+  }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `transaction` | Base64-encoded unsigned `VersionedTransaction` -- sign locally and submit on-chain |
-| `vaultIndex` | The vault index assigned by the factory |
-| `vaultPda` | Vault PDA address |
-| `vaultMintPda` | Vault mint PDA address |
-| `policyId` | Mongo ID of the committed (unlinked) policy |
+| Path on body | Description |
+|---|---|
+| `body.data.onChain.transaction` | Base64-encoded unsigned `VersionedTransaction` -- sign locally and submit on-chain |
+| `body.data.onChain.vaultIndex` | The vault index assigned by the factory |
+| `body.data.onChain.vaultPda` | Vault PDA address |
+| `body.data.onChain.vaultMintPda` | Vault mint PDA address |
+| `body.data.policyId` | Mongo ID of the committed (unlinked) policy |
+
+> **Common misread:** reading `body.onChain.transaction` returns `undefined` and the `Buffer.from(undefined, "base64")` call throws — the misread is the bug, not the backend. Always go through `body.data`.
 
 **Response (400) - Policy Violation:**
+
+The thrown `BadRequestException` is formatted by `GlobalExceptionFilter` — the `violations[]` array lives at `body.error.violations`, not `body.violations`. The wire shape:
+
 ```json
 {
   "statusCode": 400,
-  "message": "Policy validation failed",
-  "ok": false,
-  "violations": [
-    {
-      "violationCode": "rule2MinAmmLiquidity",
-      "message": "Mint Bonk... has $30000 AMM liquidity; policy requires at least $100000.",
-      "details": { "mint": "Dez...", "observedUsd": 30000, "minUsd": 100000 }
-    },
-    {
-      "violationCode": "rule5MaxPctPerAsset",
-      "message": "Mint JUP... proposed at 80%; policy max is 60%.",
-      "details": { "mint": "JUP..." }
-    }
-  ]
+  "path": "/api/v2/agent/launch-dtf",
+  "timestamp": "2026-05-06T12:34:56.789Z",
+  "error": {
+    "message": "Proposed basket violates the supplied constitutional policy. Adjust the policy or the basket and try again.",
+    "ok": false,
+    "violationCode": "rule2MinAmmLiquidity",
+    "violations": [
+      {
+        "violationCode": "rule2MinAmmLiquidity",
+        "message": "Mint Bonk... has $30000 AMM liquidity; policy requires at least $100000.",
+        "details": { "mint": "Dez...", "observedUsd": 30000, "minUsd": 100000 }
+      },
+      {
+        "violationCode": "rule5MaxPctPerAsset",
+        "message": "Mint JUP... proposed at 80%; policy max is 60%.",
+        "details": { "mint": "JUP..." }
+      }
+    ],
+    "error": "Bad Request",
+    "statusCode": 400
+  }
 }
 ```
+
+> **Read violations from `body.error.violations`.** The dry-run-style flat shape (`{ ok, violations }` at the top level) is *not* what the wire produces here — that's the function-return shape inside the service, before the exception filter wraps it. Same per-entry schema as `/policy/dry-run`'s `policyCheck.violations`, so the violation-code translation table in Section 14 is reusable.
 
 **Every applicable rule is evaluated in a single pass** — all violations are returned together so the agent can fix them in one iteration. See Section 14 for the full list of violation codes and debugging strategy.
 
@@ -304,25 +352,30 @@ Called after the agent has signed and submitted the vault creation transaction o
 
 **Do NOT send policy fields here.** `asset_mode`, `asset_whitelist`, `min_amm_liquidity_usd`, etc. all belong in `/launch-dtf` and are ignored/rejected here.
 
-**Response (201):**
+**Response (201)** — same `ResponseMiddleware` wrapping as `/launch-dtf`. The agent reads `body.data.vault[0].vault.vaultIndex` and `body.data.policyId`:
+
 ```json
 {
-  "vault": [
-    {
-      "eventType": "VaultCreated",
-      "vault": {
-        "vaultName": "Blue Chip Fund",
-        "vaultSymbol": "BCF",
-        "vaultIndex": 42,
-        "status": "active"
+  "status": "success",
+  "message": "OK",
+  "data": {
+    "vault": [
+      {
+        "eventType": "VaultCreated",
+        "vault": {
+          "vaultName": "Blue Chip Fund",
+          "vaultSymbol": "BCF",
+          "vaultIndex": 42,
+          "status": "active"
+        }
       }
-    }
-  ],
-  "policyId": "665c..."
+    ],
+    "policyId": "665c..."
+  }
 }
 ```
 
-The returned `policyId` is the policy committed during `/launch-dtf`, now linked to the on-chain vault by the chain-event pipeline.
+The returned `body.data.policyId` is the policy committed during `/launch-dtf`, now linked to the on-chain vault by the chain-event pipeline.
 
 **Errors:** `400` Validation error, transaction not found, vault DB persist failed | `409` No unlinked policy found for this vault (was `/launch-dtf` called first?)
 
