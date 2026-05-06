@@ -1,6 +1,6 @@
 # DFM Agent
 
-Fully autonomous AI agent skill for DTF (DeFi Token Fund) vault management on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys on-chain -- no human confirmation required.
+Fully autonomous SKILL, where agents launch, manage, and trade policy-governed portfolios on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys onchain -- no human confirmation required.
 
 ## Quick Start
 
