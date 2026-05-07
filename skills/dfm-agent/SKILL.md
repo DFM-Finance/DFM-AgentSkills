@@ -2076,9 +2076,11 @@ The script below runs **all four deposit phases in one async chain** — each ph
 | 1 | `POST /vaults/:symbol/check-min-deposit` (mandatory gate) | `PHASE_1_OK gate=passed` |
 | 2 | `POST /vaults/:symbol/deposit-tx` (build unsigned tx) | `PHASE_2_OK vaultIndex=<n>` |
 | 3 | Sign locally with `DFM_AGENT_KEYPAIR` + `sendRawTransaction` + `confirmTransaction` | `PHASE_3_OK onChainSig=<sig>` |
-| 4 | `POST /deposit-transaction` (swap fan-out + DB record persist) | `DEPOSIT_OK { … }` (final success — JSON line) |
+| 4 | `POST /deposit-transaction` (**swap fan-out + DB record persist — NOT idempotent**; every call re-dispatches a fresh on-chain swap) | `DEPOSIT_OK { … }` (final success — JSON line) |
 
 **Do not run these phases as separate `node -e` invocations** — keep the chain inside a single script so the agent can't accidentally proceed before a phase resolves. **Do not surface success to the user** until the final `DEPOSIT_OK { … }` JSON line appears on stdout. A `PHASE_3_OK` (on-chain confirmed) **is not enough** — without `DEPOSIT_OK`, the `UserVaultPosition` keyed on `agentProfile` was never written, and the user's later redeem will fail with `No position found for agent in this vault`.
+
+**Equally important: do not retry Phase 4 if it fails.** Phase 4 (`POST /deposit-transaction`) is **not just a recorder**. It dispatches a fresh on-chain `agentSwap` (vault USDC → underlyings via Jupiter) on every call, in addition to writing DB records. If Phase 4 times out, returns 5xx, or the network drops the response, the swap may have partially completed server-side — and re-calling triggers a *second* swap on whatever vault USDC remains, double-dipping and breaking NAV. The skill's error table below explicitly forbids retrying `/deposit-transaction` on any non-200 response, including transient-looking gateway timeouts. **Read that rule before deciding what to do on Phase 4 failure.**
 
 ```bash
 node -e '
@@ -2163,14 +2165,28 @@ function call(path, method, body) {
   await conn.confirmTransaction(onChainSig, "confirmed");
   console.log("PHASE_3_OK onChainSig=" + onChainSig);
 
-  // PHASE 4 — Record (await /deposit-transaction response before declaring success)
-  // Backend runs two server-side sub-operations:
-  //   (a) agentSwap — vault USDC -> underlyings via Jupiter
+  // PHASE 4 — Swap + Record (await /deposit-transaction response before declaring success)
+  //
+  // ⚠️  THIS ENDPOINT IS NOT IDEMPOTENT AGAINST RETRIES. ⚠️
+  // Every call dispatches a fresh on-chain swap fan-out. Calling it twice with
+  // the same transactionSignature triggers a SECOND agentSwap that pulls more
+  // vault USDC into Jupiter — breaking NAV and stranding USDC in the admin
+  // wallet. If this phase times out or returns 5xx, see the failure-mode rule
+  // below: do NOT retry, do NOT re-run the script, do NOT call any deposit
+  // endpoint again with the same signature. Surface the on-chain signature to
+  // the user and stop. The chain-event pipeline + operator are the only safe
+  // recovery paths once Phase 4 is in an unknown state.
+  //
+  // Backend runs two server-side sub-operations on every call:
+  //   (a) agentSwap — vault USDC -> underlyings via Jupiter (NOT idempotent)
   //   (b) depositTransaction — parses VaultDeposited logs, writes
   //       DepositTransaction + UserVaultPosition (keyed on agentProfile) +
-  //       DepositRecord + History
-  // Failure modes are surfaced INSIDE the 200 response (swap.failedSwapsInfo,
-  // deposit.events[].vaultDepositUpdateError) — neither aborts the flow.
+  //       DepositRecord + History (DB-layer idempotency guard exists)
+  // Failure modes surfaced INSIDE the 200 response (swap.failedSwapsInfo,
+  // deposit.events[].vaultDepositUpdateError) are non-fatal and do NOT warrant
+  // a re-call. Any non-200 response (timeout, 5xx, network error) is a HARD
+  // STOP — the swap dispatch already happened server-side and the agent
+  // cannot tell from the client side how much of it completed.
   const rec = await call("/api/v2/agent/deposit-transaction", "POST", {
     transactionSignature: onChainSig,
     vaultIndex: build.body.vaultIndex,
@@ -2208,6 +2224,8 @@ function call(path, method, body) {
 ```
 
 Run with `timeout: 600000` (10 minutes). The four `*_OK` markers print as each phase resolves; the agent should follow them but report success **only when `DEPOSIT_OK { … }` appears**. On any other terminal line (`MIN_DEPOSIT_FAIL`, `BUILD_ERROR`, `RECORD_ERROR`, `FATAL`), surface the documented failure-message template and stop.
+
+**⚠️ HARD STOP — `RECORD_ERROR` or `FATAL` after `PHASE_3_OK`.** If Phase 3 logged but the script did not emit `DEPOSIT_OK`, the on-chain deposit succeeded (shares were minted to the depositor) but Phase 4's server-side state is unknown — the `agentSwap` may have partially completed, fully completed without responding, or timed out before any swap. **Do NOT re-run the script. Do NOT re-call `/deposit-transaction` with the same signature. Do NOT call any other deposit endpoint to "fix" it.** Re-calling `/deposit-transaction` triggers a *second* `agentSwap` against whatever USDC is still in the vault, double-dipping and corrupting NAV. The only safe response is to surface the on-chain signature to the user with the message: *"The deposit landed on-chain — your shares are minted and visible in your wallet. The platform's swap step couldn't be confirmed from this side; an operator will reconcile it. Please don't retry from this end."* Then end the turn. This rule overrides any harness-level retry instinct.
 
 #### Deposit completion messaging — MANDATORY format
 
@@ -2588,6 +2606,7 @@ What changed:
 | `/deposit-tx` returns `400 Signed price vaultPubkey ... does not match derived vault PDA` | KMS signer is mis-configured for this vault. **Do NOT retry** — surface to the user; this is an operator-side fix. |
 | `/deposit-transaction` returns `200` with `swap.failedSwapsInfo` populated | Per-asset Jupiter swap failed and the backend already returned the USDC to the vault. Treat the deposit as recorded; warn the user about the failed swap count. **Do NOT re-call** `/deposit-transaction` — the deposit record already exists. |
 | `/deposit-transaction` returns `200` with `deposit.events[].vaultDepositUpdateError` | The deposit record-write failed but the on-chain swap succeeded. Surface to user. The chain-event pipeline will eventually reconcile. **Do NOT re-call** with the same signature (idempotency guard will surface the existing record). |
+| `/deposit-transaction` times out, returns 5xx, gateway error, socket reset, or any non-200 response after `PHASE_3_OK` | **HARD STOP — DO NOT RETRY THIS ENDPOINT, EVER.** Every call dispatches a fresh `agentSwap` server-side. If the response was lost in transit, the swap may have partially or fully completed without you knowing — re-calling with the same signature triggers a *second* swap fan-out against remaining vault USDC, breaking NAV and stranding USDC in the admin wallet. (This is the SOLCORE 7-USDC incident: 7 deposited, only 1.7 entered the basket, shares minted at the wrong NAV.) Surface to user verbatim: *"The deposit landed on-chain — your shares are minted and visible in your wallet. The platform's swap step couldn't be confirmed from this side; an operator will reconcile it. Please don't retry from this end."* Then end the turn. **This rule overrides any harness-level retry instinct, any "retry on transient error" pattern, and any reasoning along the lines of "the recorder timed out so I'll just retry the recorder" — Phase 4 is NOT just a recorder.** |
 | `/redeem/execute/:ticketId` throws | The ticket is **auto-cancelled** by the backend. Do NOT call `/cancel`. Surface error to user and end. |
 | Ticket polling times out (`isReady` never true within 5 min) | Cancel manually via v1 `DELETE /api/v1/tx-event-management/redeem/cancel/:ticketId` and surface to user. Then call `/redeem/request-ticket` fresh if they want to retry. |
 | `/redeem-tx` returns `400 InvalidPriceSignature` (after signing/submit) | The KMS-signed price expired between build and submit. Re-call `/redeem-tx` to get a fresh price; do NOT submit the stale tx. |
@@ -3099,6 +3118,7 @@ const signerPublicKey = keypair.publicKey.toBase58();
 | **`/deposit-tx` returns 400 `Signed price vaultPubkey ... does not match derived vault PDA`** | KMS signer is mis-configured for this vault (operator-side issue). **Do NOT retry.** Surface to user. |
 | **`/deposit-transaction` returns 200 with `swap.failedSwapsInfo` populated** | A subset of per-asset Jupiter swaps failed and the backend already returned the USDC to the vault. The deposit is still recorded (with the successful swap signatures). Treat as success, warn the user about the failed swap count. **Never re-call** with the same signature — the deposit record already exists. |
 | **`/deposit-transaction` returns 200 with `deposit.events[].vaultDepositUpdateError`** | On-chain swap succeeded but the DB record-write threw. The chain-event pipeline will eventually reconcile. Surface to user; do not retry (the duplicate-signature guard will surface the existing record on a re-call anyway). |
+| **`/deposit-transaction` times out, returns 5xx, gateway error, or any non-200 after `PHASE_3_OK`** | **HARD STOP. DO NOT RETRY.** This endpoint is NOT idempotent — every call dispatches a fresh `agentSwap`. A retry on a lost-response triggers a second swap fan-out against remaining vault USDC, breaking NAV (this is the SOLCORE incident pattern: deposit 7 USDC, only 1.7 lands in the basket, shares minted at the wrong price). Surface the on-chain signature to the user with the verbatim message in the capital-flows error table — *"deposit landed, swap step couldn't be confirmed, operator will reconcile, please don't retry"*. End the turn. Backend-side reconciliation is the only safe recovery; agent-side retry is forbidden regardless of how transient the error looks. |
 | **`/redeem/execute/:ticketId` throws** | The backend has **already auto-cancelled** the ticket — do NOT call `/redeem/cancel/:ticketId`. Surface the error to the user and end the turn. |
 | **Ticket polling exceeds 5 minutes without `isReady=true`** | Cancel via v1 `DELETE /api/v1/tx-event-management/redeem/cancel/:ticketId`, surface to user, then call `/redeem/request-ticket` fresh if they want to retry. Don't poll forever. |
 | **`/redeem-tx` returns 400 `InvalidPriceSignature` after the on-chain submit** | The KMS-signed share price baked into the tx expired between build and submit. Re-call `/redeem-tx` for a fresh price; do **NOT** submit the stale tx again. |
