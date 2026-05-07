@@ -2082,6 +2082,18 @@ The script below runs **all four deposit phases in one async chain** — each ph
 
 **Equally important: do not retry Phase 4 if it fails.** Phase 4 (`POST /deposit-transaction`) is **not just a recorder**. It dispatches a fresh on-chain `agentSwap` (vault USDC → underlyings via Jupiter) on every call, in addition to writing DB records. If Phase 4 times out, returns 5xx, or the network drops the response, the swap may have partially completed server-side — and re-calling triggers a *second* swap on whatever vault USDC remains, double-dipping and breaking NAV. The skill's error table below explicitly forbids retrying `/deposit-transaction` on any non-200 response, including transient-looking gateway timeouts. **Read that rule before deciding what to do on Phase 4 failure.**
 
+**Phase 4 body — ALL FOUR fields are required, every call.** The endpoint validates every field; sending a partial body (e.g. just `transactionSignature`) returns `400` with messages like *"vaultIndex should not be empty"*, *"amountInRaw must be a string"*, etc. **Do NOT interpret these validation errors as a contract change** — they mean the agent constructed an incomplete body, not that the API needs new fields. The required shape is fixed:
+
+| Field | Source (Phase 2 response) | Required? | Type |
+|---|---|---|---|
+| `transactionSignature` | The `onChainSig` from Phase 3 (after `sendRawTransaction` + `confirmTransaction`) | **Yes** | string (base58 sig) |
+| `vaultIndex` | `build.body.vaultIndex` | **Yes** | integer (u32) |
+| `etfSharePriceRaw` | `build.body.etfSharePriceRaw` | **Yes** | string (raw u64, 6 dec) |
+| `amountInRaw` | `build.body.amountInRaw` | **Yes** | string (raw u64, 6 dec) |
+| `slippage` | hard-coded `200` (or pass user's value) | No | integer (50–500 bps) |
+
+The script below already wires all four fields from Phase 2's response. **Never hand-construct a Phase 4 call with a different body shape**, especially not "just the signature to retry the recorder" — that's the failure mode that produced the validation error reported by clients. If the script's call site fails, the answer is *not* to manually retry with a smaller body; see the hard-stop rule for `/deposit-transaction` non-200 responses in the error table.
+
 ```bash
 node -e '
 const http = require("http");
@@ -2187,14 +2199,22 @@ function call(path, method, body) {
   // a re-call. Any non-200 response (timeout, 5xx, network error) is a HARD
   // STOP — the swap dispatch already happened server-side and the agent
   // cannot tell from the client side how much of it completed.
+  // ALL FOUR fields are required — sending a partial body (e.g. just
+  // transactionSignature) returns 400 ("vaultIndex should not be empty",
+  // "amountInRaw must be a string", etc). Wire each from Phase 2's response.
   const rec = await call("/api/v2/agent/deposit-transaction", "POST", {
-    transactionSignature: onChainSig,
-    vaultIndex: build.body.vaultIndex,
-    etfSharePriceRaw: build.body.etfSharePriceRaw,
-    amountInRaw: build.body.amountInRaw,
-    slippage: 200,
+    transactionSignature: onChainSig,                   // from Phase 3 (on-chain submit)
+    vaultIndex: build.body.vaultIndex,                  // from Phase 2 (/deposit-tx response)
+    etfSharePriceRaw: build.body.etfSharePriceRaw,      // from Phase 2 (/deposit-tx response)
+    amountInRaw: build.body.amountInRaw,                // from Phase 2 (/deposit-tx response)
+    slippage: 200,                                      // optional; default 200 bps
   });
   if (rec.status !== 200) {
+    // HARD STOP: do NOT retry. See the deposit error table for /deposit-transaction
+    // non-200 — every call dispatches a fresh agentSwap, retrying breaks NAV.
+    // Do NOT re-call with a "minimal" body either — the API contract is the
+    // five fields above, and validation errors here mean the body was wrong,
+    // not that the contract changed.
     console.log("RECORD_ERROR " + rec.status + ": " + JSON.stringify(rec.body));
     return;
   }
@@ -2604,6 +2624,7 @@ What changed:
 | `/check-min-redeem` returns `200 { isValid: false, ... }` | **Hard gate — do NOT proceed to `/redeem/request-ticket`.** Surface `message` to the user, ask for a larger amount, then re-run the gate. Note: the endpoint returns HTTP 200 even on fail — read `isValid`, not the status code. |
 | `/deposit-tx` returns `400 Vault "<symbol>" has no on-chain vaultIndex` | The vault hasn't been created on-chain yet — `/launch-dtf` was called but `/dtf-create` (and the on-chain submit between them) never landed. Surface to the user. |
 | `/deposit-tx` returns `400 Signed price vaultPubkey ... does not match derived vault PDA` | KMS signer is mis-configured for this vault. **Do NOT retry** — surface to the user; this is an operator-side fix. |
+| `/deposit-transaction` returns `400` with validation messages like *"vaultIndex should not be empty"*, *"amountInRaw must be a string"*, *"etfSharePriceRaw should not be empty"* | The body was hand-constructed and missed required fields. **This is NOT a contract change** — the endpoint has always required `transactionSignature` + `vaultIndex` + `etfSharePriceRaw` + `amountInRaw` (four required fields, with optional `slippage`). Do NOT interpret the validation error as "API needs new fields" and try to discover the contract by trial and error. Re-run the deposit script (which wires all four fields from Phase 2's response) — but ONLY if `PHASE_3_OK` was never logged. If `PHASE_3_OK` did log (on-chain deposit already happened) and this 400 came from a manual retry attempt, treat it as the same hard-stop case as the "non-200 after PHASE_3_OK" rule below: surface the on-chain signature with the operator-reconcile message and stop. |
 | `/deposit-transaction` returns `200` with `swap.failedSwapsInfo` populated | Per-asset Jupiter swap failed and the backend already returned the USDC to the vault. Treat the deposit as recorded; warn the user about the failed swap count. **Do NOT re-call** `/deposit-transaction` — the deposit record already exists. |
 | `/deposit-transaction` returns `200` with `deposit.events[].vaultDepositUpdateError` | The deposit record-write failed but the on-chain swap succeeded. Surface to user. The chain-event pipeline will eventually reconcile. **Do NOT re-call** with the same signature (idempotency guard will surface the existing record). |
 | `/deposit-transaction` times out, returns 5xx, gateway error, socket reset, or any non-200 response after `PHASE_3_OK` | **HARD STOP — DO NOT RETRY THIS ENDPOINT, EVER.** Every call dispatches a fresh `agentSwap` server-side. If the response was lost in transit, the swap may have partially or fully completed without you knowing — re-calling with the same signature triggers a *second* swap fan-out against remaining vault USDC, breaking NAV and stranding USDC in the admin wallet. (This is the SOLCORE 7-USDC incident: 7 deposited, only 1.7 entered the basket, shares minted at the wrong NAV.) Surface to user verbatim: *"The deposit landed on-chain — your shares are minted and visible in your wallet. The platform's swap step couldn't be confirmed from this side; an operator will reconcile it. Please don't retry from this end."* Then end the turn. **This rule overrides any harness-level retry instinct, any "retry on transient error" pattern, and any reasoning along the lines of "the recorder timed out so I'll just retry the recorder" — Phase 4 is NOT just a recorder.** |
