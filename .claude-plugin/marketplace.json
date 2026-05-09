@@ -1,0 +1,26 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "dfm-agent-skills",
+  "description": "DFM Finance agent skills for autonomous DTF vault management on Solana",
+  "owner": {
+    "name": "DFM Finance",
+    "email": "diegoarimaync@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "dfm-agent",
+      "description": "Fully autonomous DTF vault management on Solana. The agent independently researches markets, decides vault names/symbols/allocations/policies, and deploys on-chain — no human confirmation required.",
+      "author": {
+        "name": "DFM Finance"
+      },
+      "category": "defi",
+      "source": {
+        "source": "github",
+        "repo": "DFM-Finance/DFM-AgentSkills",
+        "commit": "1be174b8c52bea7f87968d1d765ee3b75dfd97dc",
+        "sha": "1be174b8c52bea7f87968d1d765ee3b75dfd97dc"
+      },
+      "homepage": "https://qa.dfm.finance"
+    }
+  ]
+}
