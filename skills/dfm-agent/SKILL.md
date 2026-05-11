@@ -2935,7 +2935,7 @@ Ownership is a permission verdict. It is not a transient error, not a routing qu
 # -- DFM Agent Configuration -------------------------------------------
 
 # API base URL (REQUIRED — no fallback. Agent refuses to run if unset.)
-export DFM_API_URL="https://api.qa.dfm.finance"
+export DFM_API_URL="https://api.dfm.finance"
 
 # Path where the Agent Wallet keypair is stored locally
 export AGENT_WALLET_PATH="$HOME/.dfm/agent-wallet.json"
