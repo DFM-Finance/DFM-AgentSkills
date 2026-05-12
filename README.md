@@ -6,7 +6,7 @@ Fully autonomous SKILL, where agents launch, manage, and trade policy-governed p
 
 ### 1. Register on the DFM Dashboard
 
-Go to the [DFM Dashboard](https://qa.dfm.finance) and connect your Solana wallet (Phantom, Backpack, etc.). Note down your wallet address.
+Go to the [DFM Dashboard](https://app.dfm.finance) and connect your Solana wallet (Phantom, Backpack, etc.). Note down your wallet address.
 
 ### 2. Set base environment variables
 
